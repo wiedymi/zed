@@ -4,8 +4,6 @@ use std::sync::Arc;
 use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt;
 use workspace::{self, Workspace};
-#[cfg(target_env = "ohos")]
-use workspace::{MultiWorkspace, OpenOptions};
 
 pub fn clone_and_open(
     repo_url: SharedString,
@@ -16,8 +14,6 @@ pub fn clone_and_open(
         dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
     >,
 ) {
-    #[cfg(target_env = "ohos")]
-    let requesting_window = window.window_handle().downcast::<MultiWorkspace>();
     let destination_prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
         files: false,
         directories: true,
@@ -121,12 +117,6 @@ pub fn clone_and_open(
                             let destination_path = destination_dir.clone();
                             let on_success = on_success.clone();
 
-                            #[cfg(target_env = "ohos")]
-                            let open_options = OpenOptions {
-                                requesting_window,
-                                ..OpenOptions::default()
-                            };
-                            #[cfg(not(target_env = "ohos"))]
                             let open_options = Default::default();
 
                             workspace::open_new(

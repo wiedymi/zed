@@ -118,7 +118,7 @@ fn get_ohos_system_shell() -> String {
         .unwrap_or_else(|| std::ffi::OsString::from("/data/app"));
     Path::new(&private_home)
         .join("zedtools.org")
-        .join("zedtools_0.7.0")
+        .join("zedtools_0.8.0")
         .join("bin")
         .join("sh")
         .to_string_lossy()

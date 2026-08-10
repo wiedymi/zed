@@ -8,14 +8,24 @@ import {
 } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
-import { configureAuxiliaryWindowStage } from './AuxiliaryWindow';
+import { configureWindowStage } from './AuxiliaryWindow';
+import { deliverNotificationResponse } from './NativeBridge';
 
 const LOG_DOMAIN = 0xD002;
 const LOG_TAG = 'ZedOHOS';
 const READ_PASTEBOARD: Permissions = 'ohos.permission.READ_PASTEBOARD';
 
 export default class EntryAbility extends UIAbility {
-  onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+  private handleNotificationWant(want: Want): void {
+    const tag = want.parameters?.['zed.notification.tag'];
+    if (typeof tag !== 'string') {
+      return;
+    }
+    const action = want.parameters?.['zed.notification.action'];
+    deliverNotificationResponse(tag, typeof action === 'string' && action.length > 0 ? action : undefined);
+  }
+
+  onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (error) {
@@ -39,10 +49,15 @@ export default class EntryAbility extends UIAbility {
         hilog.error(LOG_DOMAIN, LOG_TAG, 'Failed to request pasteboard permission: %{public}s', JSON.stringify(error));
       });
     hilog.info(LOG_DOMAIN, LOG_TAG, 'Zed ability created');
+    this.handleNotificationWant(want);
+  }
+
+  onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    this.handleNotificationWant(want);
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    configureAuxiliaryWindowStage(windowStage);
+    configureWindowStage(windowStage);
     windowStage.loadContent('pages/Index', (error) => {
       if (error.code) {
         hilog.error(LOG_DOMAIN, LOG_TAG, 'Failed to load Zed surface: %{public}s', JSON.stringify(error));

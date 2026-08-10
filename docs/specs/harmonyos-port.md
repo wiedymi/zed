@@ -1,6 +1,6 @@
 # Spec: Porting Zed to HarmonyOS NEXT / OpenHarmony
 
-**Status:** P1 renderer-parity and P4 developer-tooling milestones in progress — native workspace, full Native Drawing styles, stable resize/input, external folders, a separate native Settings window, shell, Toybox, Git, and idle process scheduling verified; the rebuilt Node/LSP package is installed and awaiting on-device language-server validation
+**Status:** P1 renderer-parity, P4 developer-tooling, and P5 runtime-validation milestones in progress — the native workspace, Native Drawing styles, stable resize/input, external folders, general native windows, shell/Toybox/Git, system notifications, reveal/open-with, and idle process scheduling are implemented; Node/LSP and packaged OpenSSH still need fresh on-device acceptance coverage
 
 **Author:** wiedymi
 
@@ -49,11 +49,12 @@ the product shell rather than an editor-only demo.
 | Clipboard | HarmonyOS system pasteboard read/write working; on-device round trip verified and pasteboard permission handled by `EntryAbility` |
 | Credentials | HarmonyOS Asset Store read/write/delete working with persistent, encrypted records; restart survival and deletion verified on-device |
 | Agent/network UI | Production Agent panel, language-model/provider initialization, ACP tools, web-search providers, prompt store, and real Reqwest HTTP client enabled; provider use still requires normal account/API configuration |
-| App menu/system bridges | In-window Zed/File/Edit/Selection/View/Go/Run/Help menus use production actions for sign-in/out, settings, folder/file opening, save, search, selection, comments, diagnostics, tasks, panels, themes, extensions, command palette, onboarding, and feedback. The menu works on-device. The production Settings view opens in a separate non-modal native `Zed — Settings` subwindow with server decorations, its own XComponent, GPUI window state, surface, atlas, input routing, resize callbacks, and close lifecycle. Settings rendering and keyboard input were verified while the main workspace remained alive behind it. User settings and keymap files are watched and reloaded. URL opening and HarmonyOS document select/save pickers are bridged through ArkTS. |
-| External workspaces | `DocumentViewPicker` selection, persistent URI permission, native FileShare URI-to-path resolution, restart restoration, public workspace access, and live folder-to-folder switching with complete workspace docks work on-device. Clone's “Open repo in new project” choice creates a distinct `Workspace` in the existing OHOS `MultiWorkspace` until general workspace-window support is available. |
-| Process-backed UI | A private `zedtools` HNP supplies Dash, Toybox 0.8.11, and Git 2.51.0. Terminal pipes, Git init/status/config/add/commit/log, HTTPS `ls-remote`, and shallow clone are verified on-device. PTY creation is denied by the HAP SELinux domain, so terminals intentionally use pipes. OHOS child pipes use blocking worker-backed I/O because both epoll and POSIX poll repeatedly report false readiness for these descriptors; terminal output still flows and the workers sleep at idle. |
+| App menu/system bridges | In-window Zed/File/Edit/Selection/View/Go/Run/Help menus use production actions for sign-in/out, settings, folder/file opening, save, search, selection, comments, diagnostics, tasks, panels, themes, extensions, command palette, onboarding, and feedback. The menu works on-device. Settings and every later GPUI window use real non-modal ArkUI subwindows with server decorations, independent XComponents/surfaces/atlases/input, native move/maximize/fullscreen state feedback, and close lifecycle. User settings and keymap files are watched and reloaded. URL opening, reveal/open-with, document select/save, system notifications/actions, and application activate/background/restart use ArkTS system APIs. |
+| External workspaces | `DocumentViewPicker` selection, persistent URI permission, native FileShare URI-to-path resolution, restart restoration, public workspace access, and live folder-to-folder switching with complete workspace docks work on-device. The old OHOS same-window workaround has been removed: Open Folder honors Zed's configured new-window behavior, Open Files and clone's “Open repo in new project” use normal distinct GPUI/native windows. The generalized paths are cross-built and packaged; fresh multi-window runtime coverage is pending. |
+| Drag and drop | ArkUI UDMF file/folder/file-URI records are accepted on main and auxiliary XComponents, resolved through native FileShare URI conversion, and emitted as GPUI `FileDropEvent` enter/move/leave/submit/end sequences. Cross-built and packaged; fresh on-device coverage is pending. |
+| Process-backed UI | A private `zedtools` HNP supplies Dash, Toybox 0.8.11, Git 2.51.0, Node.js 22.23.2/npm, OpenSSH 10.4p1 clients, and a native askpass bridge. Terminal pipes, Git init/status/config/add/commit/log, HTTPS `ls-remote`, and shallow clone are verified on-device. PTY creation is denied by the HAP SELinux domain, so terminals intentionally use pipes. OHOS child pipes use blocking worker-backed I/O because both epoll and POSIX poll repeatedly report false readiness for these descriptors; terminal output still flows and the workers sleep at idle. OpenSSH/askpass are reproducibly cross-built and packaged but not yet exercised on-device. |
 | Language servers | Built-in grammars and language adapters are registered. The rebuilt Node.js 22.23.2/npm HNP with the Tailwind Unicode-regexp and ESLint `openharmony` packaging adaptations is built, packaged, and installed; its Node executable is a validated x86_64 OHOS PIE linked only to OHOS libc/libc++. vtsls launched with the earlier package. Tailwind, ESLint, and complete diagnostics are not recorded as fixed until this newly installed package is exercised on-device. |
-| Platform work still pending | General workspace/tool multi-window support beyond the main-plus-Settings pair, exact non-sRGB gradient interpolation, active-scene text/path profiling and native-object lifetime instrumentation, lifecycle stress coverage, reveal/open-with, downloaded native executable policy, SSH, and physical-device validation |
+| Platform work still pending | Exact non-sRGB gradient interpolation, active-scene text/path profiling and native-object lifetime instrumentation, lifecycle/surface-loss stress coverage, accessibility, crash/update strategy, downloaded native executable policy, on-device SSH/drag-drop/general-window acceptance, complete Node/LSP/task acceptance, and physical-device validation |
 
 Observed emulator contract:
 
@@ -82,12 +83,12 @@ The following decisions are authoritative for the initial port:
 9. **Production UI is enabled before its executable backends.** Agent, Project, Outline, Git, and Terminal panels remain real Zed components. Missing HNP tools produce explicit unavailable/error states rather than substitute implementations.
 10. **Credentials use HarmonyOS Asset Store.** Provider secrets are stored as persistent, encrypted Asset Store records. The alias is a SHA-256-derived identifier and the username/password payload is versioned and limited to the platform's 1024-byte secret bound.
 11. **No compatibility shims for missing developer tools.** Git, terminals, language servers, tasks, and SSH become functional only through tested HNP executables and the normal Zed integrations.
-12. **The initial HNP toolchain is Dash + Toybox + Git + Node/npm.** Dash provides POSIX shell behavior, Toybox supplies standard utilities, patched upstream Git supplies the normal Zed Git backend, and upstream Node 22 supplies JavaScript language-server execution and npm installation.
+12. **The HNP toolchain is Dash + Toybox + Git + Node/npm + OpenSSH clients.** Dash provides POSIX shell behavior, Toybox supplies standard utilities, patched upstream Git supplies the normal Zed Git backend, upstream Node 22 supplies JavaScript language-server execution and npm installation, and pinned OpenSSH supplies normal `ssh`/`scp`/`sftp` transport through Zed's existing remote integration. OpenSSL is linked statically into the OpenSSH clients, and password prompts use a packaged native UDS askpass helper rather than an executable shim generated outside HNP.
 13. **PTY denial is a platform constraint, not emulated away.** The current HAP SELinux domain cannot open `/dev/ptmx`; terminal sessions therefore use real child processes over stdin/stdout/stderr pipes. Interactive PTY semantics remain a physical-image/policy gate.
 14. **Public workspace Git metadata may live privately.** When HarmonyOS prevents atomic `.git` directory operations in an authorized public directory, Zed uses deterministic private metadata and a standard `.git` gitfile pointer while retaining the public worktree.
-15. **Settings uses a dedicated native auxiliary window.** `gpui_ohos` currently supports the main workspace plus one non-modal Settings subwindow. Each maps its actual ArkUI XComponent ID to independent GPUI window state, Native Drawing surface, atlas, callbacks, focus, resize, and input routing. ArkTS prewarms the hidden Settings XComponent after the main workspace's initial paint because a never-shown subwindow does not instantiate its XComponent; it then minimizes the subwindow until GPUI requests it. HarmonyOS owns the Settings titlebar, move, maximize, resize, and close controls through server decorations. This is the final Settings architecture, but not yet arbitrary general multi-window support.
+15. **Every additional GPUI window uses a native ArkUI subwindow.** `gpui_ohos` assigns a monotonic native ID to each non-primary GPUI window, and ArkTS creates a non-modal subwindow/XComponent for that ID. Each window has independent GPUI state, Native Drawing surface, atlas, callbacks, focus, resize, file-drop, and close lifecycle. HarmonyOS owns the titlebar, movement, maximize, fullscreen, resize, and close controls through server decorations; native rect/status events are fed back to GPUI so persisted bounds are not reset during surface resize. Settings is one consumer of this general path, not a special renderer/window slot.
 16. **OHOS child-process pipes use blocking worker-backed I/O.** The emulator's pipe descriptors repeatedly wake both epoll and POSIX poll before a nonblocking read can make progress, causing `async-io` workers to spin. The OHOS `async-process` adaptation wraps child stdin/stdout/stderr with `blocking::Unblock`, as its Windows backend does. Async sockets and the Unix child reaper remain unchanged.
-17. **Workspace initialization follows entity creation, not the first app window.** The OHOS bootstrap observes every production `Workspace` and attaches its real panels and workspace actions there. Folder, recent-project, restore, and clone flows must never depend on one-off initialization of the sandbox workspace. Although `gpui_ohos` now exposes a dedicated Settings subwindow, it does not yet expose arbitrary workspace windows; clone's “Open repo in new project” path therefore uses a separate production `Workspace` inside the existing `MultiWorkspace` until general workspace-window support is implemented.
+17. **Workspace initialization follows entity creation, not the first app window.** The OHOS bootstrap observes every production `Workspace` and attaches its real panels and workspace actions there. Folder, recent-project, restore, and clone flows must never depend on one-off initialization of the sandbox workspace. New-window requests use the same upstream Zed flow as other desktop platforms and are mapped by `gpui_ohos` to native ArkUI subwindows.
 
 ### Not a current decision
 
@@ -310,25 +311,26 @@ The initial `gpui_ohos` support matrix is:
 | Area | Initial requirement |
 |---|---|
 | Event loop | Run GPUI callbacks on the required UI thread and wake it from Rust tasks |
-| Window | Host the main workspace and one auxiliary Settings GPUI window in distinct XComponents and report independent bounds/scale/focus |
+| Window | Host the main workspace and arbitrary auxiliary GPUI windows in distinct XComponents; report independent bounds/scale/focus/status and preserve native positions |
 | Lifecycle | Handle foreground/background, focus, resize, surface loss, and memory pressure |
 | Rendering | Translate `Scene` to Native Drawing and flush from the ArkUI frame callback |
-| Input | Hardware keyboard, modifiers, pointer, buttons, scroll, and basic touch |
+| Input | Hardware keyboard, modifiers, pointer, buttons, scroll, basic touch, and file/folder drag and drop |
 | IME | Focus, preedit, commit, selection, caret rectangle, show/hide |
 | Clipboard | Plain-text copy and paste |
 | Paths | Application files, cache, temporary, preferences, and logs directories |
-| Dialogs | Minimum error/prompt behavior needed to boot and edit |
+| Dialogs/system UI | Native prompts, document/folder/save picker, reveal/open-with, system notifications/actions, and application lifecycle controls |
 | Credentials | Store provider secrets in persistent, encrypted HarmonyOS Asset Store records |
 | Unsupported APIs | Return safe defaults or explicit unsupported errors; never panic |
 
-Accessibility, arbitrary workspace/tool windows, drag and drop, notifications, screen capture, and voice remain unfinished. The main workspace plus a separate native Settings window are implemented; this limited two-window contract must not be described as general multi-window support. URL opening plus document open/folder/save pickers are implemented. Reveal/open-with and richer native prompts remain incomplete and must not be described as supported.
+Accessibility, screen capture, voice, crash reporting, and update strategy remain unfinished. General windows, inbound file/folder drag and drop, notifications, URL opening, reveal/open-with, native prompts, and document open/folder/save pickers are implemented and cross-built. The newly added system paths still require fresh on-device acceptance coverage.
 
-The Settings XComponent is registered and briefly prewarmed only after the main
-workspace has painted. `gpui_ohos` routes native callbacks by the XComponent's
-actual ArkUI ID, renders each requested window independently during a frame, and
-removes the auxiliary GPUI state before asking ArkTS to hide the subwindow. A
-native close request first runs GPUI's `should_close`/`close` callbacks so view
-state is released rather than leaving an invisible Settings entity behind.
+`gpui_ohos` routes native callbacks by each XComponent's actual ArkUI ID,
+renders requested windows independently during a frame, and removes auxiliary
+GPUI state before asking ArkTS to destroy its subwindow. A native close request
+first runs GPUI's `should_close`/`close` callbacks so view state is released.
+ArkUI window rect/status events update GPUI origin/maximize/fullscreen state;
+surface resize changes only the logical size and cannot reset the persisted
+window origin.
 
 The ArkUI physical-pixel density is process/platform state, not transient window
 state. It must be retained even when the frame bridge is configured before the
@@ -363,7 +365,7 @@ backend is available.
 | Git UI/backend | Production panel and real packaged Git 2.51.0 backend enabled; local operations and HTTPS transport verified |
 | Language servers | Built-in grammars/adapters enabled; the replacement bundled-small-ICU Node 22/npm package and the remaining Tailwind/ESLint fixes are the active runtime gates |
 | Terminal and tasks | Dash and Toybox are packaged; terminal child processes work over blocking worker-backed pipes without idle polling spin. PTY semantics are unavailable under the current SELinux domain. Tasks can use the same HNP commands but still require dedicated on-device coverage. |
-| Remote SSH/workspaces | Disabled initially |
+| Remote SSH/workspaces | Existing Zed SSH/SCP/SFTP integration enabled with absolute HNP paths to packaged OpenSSH 10.4p1 clients. Git receives the same packaged SSH command, and the packaged native askpass helper forwards prompts over Zed's UDS session. Build/ELF/package validation is complete; connection/authentication/workspace acceptance is pending a connected emulator. |
 | Extension host / Wasmtime | Enabled with production extension store plus workspace-backed grammar/language/LSP proxies; representative extension installation still needs on-device coverage |
 | LiveKit, voice, screen capture | Disabled |
 | Auto-update and crash helper executables | Disabled |
@@ -410,6 +412,17 @@ observed running on-device with the earlier package. Tailwind and ESLint now
 have replacement-runtime/package adaptations installed, but both remain explicit
 acceptance gates until their processes and diagnostics are re-verified on-device.
 
+The same reproducible build now pins OpenSSH portable 10.4p1 and OpenSSL. It
+packages only the client programs (`ssh`, `scp`, and `sftp`) plus
+`zed-askpass`; server and unsupported sandbox backends are not built. OpenSSL
+is static, all four binaries carry the OHOS ELF note, and their only runtime
+shared-library dependency is OHOS `libc.so`. Zed's remote transport passes
+absolute HNP executable paths, including `scp -S` and `sftp -S`, rather than
+falling through to `/usr/bin/ssh`. Git uses the same packaged SSH command.
+Password prompts use the normal Zed askpass UDS protocol through the native
+packaged helper. Runtime authentication and remote-workspace coverage remain
+pending because `hdc list targets` currently reports no connected emulator.
+
 Kill/restart cleanup, foreground/background resource policy, and PTY availability on other signed images remain explicit runtime gates.
 
 Only packaged HNP executables are assumed. Downloading and executing arbitrary native binaries remains unsupported until separately proven and accepted for distribution.
@@ -422,7 +435,8 @@ The tooling order is now:
 2. [x] Package Git and reuse Zed's existing Git executable integration.
 3. [x] Package upstream Node 22/npm and launch a real Node-based language server (vtsls); finish Tailwind/ESLint acceptance coverage.
 4. [ ] Exercise tasks using the same process foundation.
-5. [ ] Package OpenSSH for the existing SSH/SCP transport, or choose an in-process transport if packaging proves unsuitable.
+5. [x] Package OpenSSH clients and a native askpass helper, and wire the existing SSH/SCP/SFTP and Git transport paths to their absolute HNP locations.
+6. [ ] Exercise SSH authentication, SCP/SFTP transfer, Git-over-SSH, and a remote workspace on-device.
 
 Each feature remains independently gated. Failure of one tool must not block the editor or renderer.
 
@@ -434,7 +448,7 @@ Each feature remains independently gated. Failure of one tool must not block the
 - [x] Configure reproducible Rust linker wrappers for `x86_64-unknown-linux-ohos`.
 - [x] Build the Rust `cdylib` and load it from ArkTS through N-API.
 - [x] Package, debug-sign, install, launch, and log from the HAP.
-- [ ] Compile the same shell for aarch64.
+- [x] Compile the full `zed_ohos` dependency graph with the real `aarch64-unknown-linux-ohos` Rust target and API 24 Clang wrappers; cross-build the pinned Dash shell as an AArch64 OHOS ELF proof. Physical runtime and a full AArch64 HNP remain P5 work.
 
 **Gate:** Rust code runs inside the actual PC emulator HAP.
 
@@ -460,7 +474,7 @@ Each feature remains independently gated. Failure of one tool must not block the
 - [x] Open and edit a real sandbox file/workspace through `RealFs`, `WorktreeStore`, and `BufferStore`.
 - [x] Automatically save edits, close/reinstall/restart, and reopen the persisted sandbox document without corruption.
 - [x] Load the production Agent, Project, Outline, Git, and Terminal panels; open Agent and Project by default. Prevent transient zero workspace bounds from seeding a tiny dock size and preserve a user-resized Project panel width across close/reopen.
-- [x] Initialize panels for every newly created `Workspace`, and verify that a live external-folder switch retains the Agent, Project, and Terminal docks. Route clone's separate-project choice through the existing `MultiWorkspace` while general workspace windows remain unavailable.
+- [x] Initialize panels for every newly created `Workspace`, and verify that a live external-folder switch retains the Agent, Project, and Terminal docks. Route clone/open-folder/open-files new-window choices through normal Zed workspace creation and the general native-window backend.
 - [x] Initialize the production HTTP client, language-model/provider stack, prompt store, and secure Asset Store credential backend.
 - [x] Initialize production file finder, diagnostics, search, LSP locations, tasks, snippets, selectors, Vim, tab switcher, prompts, settings profiles, previews, onboarding, notifications, Git-hosting providers, feature flags, ACP/web-search support, and extension language/LSP/theme registration.
 - [ ] Make every unavailable process/system-integration command visibly disabled or absent.
@@ -476,7 +490,9 @@ Each feature remains independently gated. Failure of one tool must not block the
 - [x] Validate pipe-backed processes and packaged Git network access; record the current SELinux PTY denial.
 - [x] Adapt OHOS child stdin/stdout/stderr to blocking worker-backed I/O and verify terminal output plus sleeping workers at idle.
 - [x] Implement ArkTS bridges for document/folder selection, Save As, and URL opening.
-- [ ] Implement reveal/open-with and finish lifecycle/background stress coverage.
+- [x] Implement reveal/open-with through HarmonyOS view/select Wants.
+- [x] Wire GPUI activate, hide/background, and restart to HarmonyOS UIAbility APIs.
+- [ ] Finish lifecycle/background and same-process surface-loss/recreation stress coverage on-device.
 
 **Gate:** One storage model and one HNP process model are proven without destabilizing the editor.
 
@@ -487,8 +503,10 @@ Each feature remains independently gated. Failure of one tool must not block the
 - [ ] Finish representative language-server coverage. The rebuilt Node/npm package is installed and the earlier package launched vtsls; verify Tailwind and ESLint with the replacement runtime on-device.
 - [x] Package a shell and enable terminal child processes over pipes.
 - [ ] Verify tasks and complete diagnostics from a real Node-based language server using packaged Node 22/npm; the vtsls process launch is proven.
-- [ ] Enable SSH/remote workspaces using packaged OpenSSH or a separately justified in-process transport.
-- [ ] Reassess extension-host support.
+- [x] Package OpenSSH 10.4p1 clients with static OpenSSL, packaged native askpass, and absolute-path SSH/SCP/SFTP/Git integration.
+- [ ] Verify SSH authentication, transfer, Git-over-SSH, and remote workspaces on-device.
+- [x] Reassess extension-host support and enable the production Wasmtime extension host with workspace-backed language/LSP/theme proxies.
+- [ ] Install and exercise a representative extension on-device.
 
 **Gate:** Tooling is enabled feature-by-feature with explicit package, lifecycle, and failure handling.
 
@@ -496,9 +514,11 @@ Each feature remains independently gated. Failure of one tool must not block the
 
 - [ ] Test physical aarch64 PC/2-in-1 hardware.
 - [ ] Validate OpenHarmony runtime compatibility and packaging differences.
-- [x] Add the main-plus-Settings multi-window path and open the production Settings view in a separate non-modal native window with server decorations and independent rendering/input.
-- [ ] Generalize the platform beyond the dedicated Settings subwindow to arbitrary workspace/tool windows and persist their native bounds/state.
-- [ ] Add accessibility, drag and drop, crash reporting, and update strategy.
+- [x] Open Settings in a separate non-modal native window with server decorations and independent rendering/input.
+- [x] Generalize the platform to arbitrary workspace/tool windows; route normal Open Folder/Open Files/clone new-window flows through it and synchronize native position/maximize/fullscreen state back into GPUI bounds persistence.
+- [x] Implement inbound file/folder drag and drop through ArkUI UDMF and GPUI `FileDropEvent` routing for main and auxiliary windows.
+- [ ] Verify general new-window persistence and drag/drop on-device.
+- [ ] Add accessibility, crash reporting, and update strategy.
 - [x] Profile idle frame/process scheduling and atlas bitmap creation; cache native atlas bitmaps and eliminate the child-pipe readiness spin.
 - [ ] Complete active-scene text/path profiling and Native Drawing object-lifetime instrumentation.
 - [ ] Consider an alternate renderer only if measured Native Drawing limitations justify it.
@@ -525,9 +545,9 @@ Each feature remains independently gated. Failure of one tool must not block the
 ## 11. Deferred/open decisions
 
 - Import/export UX for provider operations that cannot satisfy normal filesystem semantics.
-- The representative Node language server acceptance test and eventual OpenSSH build.
-- Whether remote SSH ultimately uses packaged OpenSSH or an in-process implementation.
-- Extension-host and Wasmtime support.
+- Representative Node language-server, task, packaged OpenSSH, and Git-over-SSH on-device acceptance tests.
+- Distribution acceptance for packaged OpenSSH clients and the native askpass helper.
+- Representative extension installation and Wasmtime execution coverage.
 - Physical-device minimum API and hardware support matrix.
 - OpenHarmony runtime and dual-distribution strategy.
 - Alternate renderer work, only after Native Drawing profiling.
@@ -535,8 +555,11 @@ Each feature remains independently gated. Failure of one tool must not block the
 ## 12. Repository evidence to keep current
 
 - `crates/zed_ohos/src/zed_ohos.rs` — HAP bootstrap, ArkUI frame bridge, real editor/worktree/buffer startup, and sandbox autosave.
-- `crates/zed_ohos/hap/entry/src/main/ets/pages/Index.ets` — XComponent host, UI context, app sandbox paths, and ArkUI frame callback.
-- `crates/gpui_ohos/src/platform.rs` — `Platform`, `PlatformWindow`, scale/input/IME coordination, and scene submission.
+- `crates/zed_ohos/hap/entry/src/main/ets/pages/Index.ets` — main XComponent host, UI context, app sandbox paths, frame callback, system picker/notification/lifecycle bridges, and native window-state feedback.
+- `crates/zed_ohos/hap/entry/src/main/ets/pages/Auxiliary.ets` and `entryability/AuxiliaryWindow.ets` — arbitrary non-modal native window creation, independent XComponents, server controls, and bounds/status lifecycle.
+- `crates/zed_ohos/hap/entry/src/main/ets/entryability/FileDrop.ets` — UDMF file/folder drag extraction and GPUI drag-sequence dispatch.
+- `crates/zed_ohos/hap/entry/src/main/ets/entryability/NativeBridge.ets` — notification-action delivery across ability/page startup ordering.
+- `crates/gpui_ohos/src/platform.rs` — `Platform`, `PlatformWindow`, general windows, system notifications, external-path opening, drag/drop, application lifecycle, scale/input/IME coordination, and scene submission.
 - `crates/gpui_ohos/src/dispatcher.rs` — background executors, reentrant foreground queue, timers, and ArkUI wake requests.
 - `crates/gpui_ohos/src/xcomponent.rs` — XComponent lifecycle/input registration, surface ownership, and FFI panic containment.
 - `crates/gpui_ohos/src/drawing.rs` — NativeWindow geometry, Native Drawing lifecycle, and scene translation.
@@ -546,9 +569,9 @@ Each feature remains independently gated. Failure of one tool must not block the
 - `crates/gpui_ohos/src/path_prompt.rs` — persistent URI permission activation and native FileShare URI-to-path resolution.
 - `crates/gpui_ohos/src/hnp.rs` — versioned lookup for packaged HNP executables.
 - `crates/zed_ohos/hap/entry/src/main/module.json5` — runtime permissions for internet, pasteboard, and persistent Asset Store data.
-- `crates/zed_ohos/hnp` — pinned shell/tool/Git/Node build inputs and HNP manifest.
+- `crates/zed_ohos/hnp` — pinned shell/tool/Git/Node/OpenSSH build inputs, native askpass helper, cross-compiler wrappers, and HNP manifest.
 - `crates/gpui_text` — renderer-neutral cosmic-text/swash GPUI text system.
-- `script/build-ohos.ps1` and `script/ohos-x86_64-clang.cmd` — repeatable Rust/HAP build, signing, install, and launch path.
+- `script/build-ohos.ps1`, `script/ohos-x86_64-clang.cmd`, and `script/ohos-aarch64-clang*.cmd` — repeatable Rust/HNP/HAP build, signing, install, launch, and secondary-target compile path.
 - `crates/gpui/src/platform.rs` — `Platform`, `PlatformWindow`, text-system, and atlas contracts.
 - `crates/gpui_wgpu/src/wgpu_renderer.rs` — reference mapping from GPUI `Scene` primitives to an existing renderer.
 - `crates/gpui_macos/src/metal_renderer.rs` — reference native renderer implementation.

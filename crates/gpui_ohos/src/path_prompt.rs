@@ -165,7 +165,7 @@ fn c_string_lossy(value: *const c_char) -> String {
         .into_owned()
 }
 
-fn resolve_uri(uri: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_uri(uri: &str) -> Result<PathBuf> {
     if !uri.contains("://") {
         let path = PathBuf::from(uri);
         ensure!(path.is_absolute(), "picker returned relative path {uri:?}");

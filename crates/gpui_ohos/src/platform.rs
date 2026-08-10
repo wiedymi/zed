@@ -14,15 +14,16 @@ use anyhow::{Context as _, Result, bail};
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, Bounds, Capslock,
-    ClipboardItem, CursorStyle, DispatchEventResult, DisplayId, DummyKeyboardMapper,
-    ForegroundExecutor, GpuSpecs, KeyDownEvent, KeyUpEvent, Keymap, Keystroke, Menu, MenuItem,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    NavigationDirection, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformKeyboardLayout,
+    ClipboardItem, CursorStyle, DispatchEventResult, DisplayId, DummyKeyboardMapper, ExternalPaths,
+    FileDropEvent, ForegroundExecutor, GpuSpecs, KeyDownEvent, KeyUpEvent, Keymap, Keystroke, Menu,
+    MenuItem, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, OwnedMenu, PathPromptOptions, Pixels, Platform,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, Scene, ScrollDelta, ScrollWheelEvent, Size, Task, ThermalState,
-    TouchEvent, TouchId, TouchPhase, UTF16Selection, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowParams, point, px,
+    RequestFrameOptions, Scene, ScrollDelta, ScrollWheelEvent, Size, SystemNotification,
+    SystemNotificationResponse, Task, ThermalState, TouchEvent, TouchId, TouchPhase,
+    UTF16Selection, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowParams, point, px,
 };
 use gpui_text::CosmicTextSystem;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -86,8 +87,14 @@ pub fn on_arkui_frame() {
 pub fn configure_frame_scheduler(
     callback: Arc<dyn Fn() -> Result<()> + Send + Sync>,
     open_external_url: Arc<dyn Fn(String) -> Result<()> + Send + Sync>,
+    open_external_path: Arc<dyn Fn(String, bool) -> Result<()> + Send + Sync>,
     set_cursor: Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>,
-    set_auxiliary_window: Arc<dyn Fn(bool, String, u32, u32) -> Result<()> + Send + Sync>,
+    control_window: Arc<dyn Fn(u32, u32, String, i32, i32, u32, u32) -> Result<()> + Send + Sync>,
+    control_application: Arc<dyn Fn(u32) -> Result<()> + Send + Sync>,
+    show_system_notification: Arc<
+        dyn Fn(u32, String, String, String, Vec<String>, Vec<String>) -> Result<()> + Send + Sync,
+    >,
+    dismiss_system_notification: Arc<dyn Fn(u32, String) -> Result<()> + Send + Sync>,
     request_path_prompt: Arc<
         dyn Fn(u32, bool, bool, bool, bool, Option<String>, Option<String>) -> Result<()>
             + Send
@@ -110,8 +117,12 @@ pub fn configure_frame_scheduler(
         platform.configure_frame_scheduler(
             callback,
             open_external_url,
+            open_external_path,
             set_cursor,
-            set_auxiliary_window,
+            control_window,
+            control_application,
+            show_system_notification,
+            dismiss_system_notification,
             request_path_prompt,
             request_prompt,
             scale_factor,
@@ -191,7 +202,16 @@ pub fn handle_memory_warning() {
     });
 }
 
-pub fn close_auxiliary_window() {
+pub fn attach_auxiliary_window(window_id: u32) -> Result<()> {
+    CURRENT_PLATFORM.with_borrow(|current| {
+        current
+            .as_ref()
+            .context("auxiliary window attached before GPUI initialized")?
+            .attach_auxiliary_window(window_id)
+    })
+}
+
+pub fn close_auxiliary_window(window_id: u32) {
     CURRENT_PLATFORM.with_borrow(|current| {
         let Some(platform) = current.as_ref() else {
             log_message(
@@ -200,11 +220,46 @@ pub fn close_auxiliary_window() {
             );
             return;
         };
-        platform.close_auxiliary_window();
+        platform.close_auxiliary_window(window_id);
+    });
+}
+
+pub fn update_arkui_window_state(
+    window_id: u32,
+    physical_left: i32,
+    physical_top: i32,
+    maximized: bool,
+    fullscreen: bool,
+) -> Result<()> {
+    CURRENT_PLATFORM.with_borrow(|current| {
+        current
+            .as_ref()
+            .context("ArkUI window state arrived before GPUI initialized")?
+            .update_arkui_window_state(
+                window_id,
+                physical_left,
+                physical_top,
+                maximized,
+                fullscreen,
+            )
+    })
+}
+
+pub fn handle_system_notification_response(tag: String, action_id: Option<String>) {
+    CURRENT_PLATFORM.with_borrow(|current| {
+        let Some(platform) = current.as_ref() else {
+            log_message(
+                LogLevel::Error,
+                "system notification response arrived before GPUI initialized",
+            );
+            return;
+        };
+        platform.handle_system_notification_response(tag, action_id);
     });
 }
 
 pub fn dispatch_arkui_key_event(
+    window_id: u32,
     action: u32,
     code: i32,
     key_text: String,
@@ -219,13 +274,31 @@ pub fn dispatch_arkui_key_event(
             );
             return false;
         };
-        platform.dispatch_arkui_key_event(ArkUiKeyEvent {
-            action,
-            code,
-            key_text,
-            unicode,
-            modifiers,
-        })
+        platform.dispatch_arkui_key_event(
+            window_id,
+            ArkUiKeyEvent {
+                action,
+                code,
+                key_text,
+                unicode,
+                modifiers,
+            },
+        )
+    })
+}
+
+pub fn dispatch_arkui_file_drop_event(
+    window_id: u32,
+    kind: u32,
+    x: f32,
+    y: f32,
+    uris: Vec<String>,
+) -> Result<()> {
+    CURRENT_PLATFORM.with_borrow(|current| {
+        let platform = current
+            .as_ref()
+            .context("ArkUI file-drop event arrived before GPUI initialized")?;
+        platform.dispatch_arkui_file_drop_event(window_id, kind, x, y, uris)
     })
 }
 
@@ -247,6 +320,7 @@ struct PlatformCallbacks {
     app_menu_action: Option<Box<dyn FnMut(&dyn Action)>>,
     will_open_app_menu: Option<Box<dyn FnMut()>>,
     validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
+    system_notification_response: Option<Box<dyn FnMut(SystemNotificationResponse)>>,
 }
 
 struct PendingPrompt {
@@ -263,7 +337,22 @@ struct ArkUiKeyEvent {
     modifiers: u32,
 }
 
-type AuxiliaryWindowCallback = Arc<dyn Fn(bool, String, u32, u32) -> Result<()> + Send + Sync>;
+type WindowControlCallback =
+    Arc<dyn Fn(u32, u32, String, i32, i32, u32, u32) -> Result<()> + Send + Sync>;
+type ApplicationControlCallback = Arc<dyn Fn(u32) -> Result<()> + Send + Sync>;
+
+const WINDOW_COMMAND_OPEN: u32 = 0;
+const WINDOW_COMMAND_CLOSE: u32 = 1;
+const WINDOW_COMMAND_SHOW: u32 = 2;
+const WINDOW_COMMAND_MINIMIZE: u32 = 3;
+const WINDOW_COMMAND_TOGGLE_MAXIMIZE: u32 = 4;
+const WINDOW_COMMAND_TOGGLE_FULLSCREEN: u32 = 5;
+const WINDOW_COMMAND_RESIZE: u32 = 6;
+const WINDOW_COMMAND_SET_TITLE: u32 = 7;
+
+const APPLICATION_COMMAND_ACTIVATE: u32 = 0;
+const APPLICATION_COMMAND_BACKGROUND: u32 = 1;
+const APPLICATION_COMMAND_RESTART: u32 = 2;
 
 struct OhosPlatform {
     component: XComponentHandle,
@@ -277,8 +366,21 @@ struct OhosPlatform {
     ime: RefCell<Option<NativeIme>>,
     menus: RefCell<Vec<OwnedMenu>>,
     open_external_url: RefCell<Option<Arc<dyn Fn(String) -> Result<()> + Send + Sync>>>,
+    open_external_path: RefCell<Option<Arc<dyn Fn(String, bool) -> Result<()> + Send + Sync>>>,
     set_cursor: RefCell<Option<Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>>>,
-    set_auxiliary_window: RefCell<Option<AuxiliaryWindowCallback>>,
+    control_window: RefCell<Option<WindowControlCallback>>,
+    control_application: RefCell<Option<ApplicationControlCallback>>,
+    show_system_notification: RefCell<
+        Option<
+            Arc<
+                dyn Fn(u32, String, String, String, Vec<String>, Vec<String>) -> Result<()>
+                    + Send
+                    + Sync,
+            >,
+        >,
+    >,
+    dismiss_system_notification:
+        RefCell<Option<Arc<dyn Fn(u32, String) -> Result<()> + Send + Sync>>>,
     request_path_prompt: RefCell<
         Option<
             Arc<
@@ -297,6 +399,9 @@ struct OhosPlatform {
     pending_path_prompts: RefCell<HashMap<u32, oneshot::Sender<Result<Option<Vec<PathBuf>>>>>>,
     pending_new_path_prompts: RefCell<HashMap<u32, oneshot::Sender<Result<Option<PathBuf>>>>>,
     next_prompt_id: Cell<u32>,
+    next_auxiliary_window_id: Cell<u32>,
+    next_system_notification_id: Cell<u32>,
+    system_notification_ids: RefCell<HashMap<String, u32>>,
     pending_prompts: RefCell<HashMap<u32, PendingPrompt>>,
     persistent_uris: RefCell<HashMap<PathBuf, String>>,
     cursor_style: Cell<CursorStyle>,
@@ -332,14 +437,21 @@ impl OhosPlatform {
             ime: RefCell::new(None),
             menus: RefCell::new(Vec::new()),
             open_external_url: RefCell::new(None),
+            open_external_path: RefCell::new(None),
             set_cursor: RefCell::new(None),
-            set_auxiliary_window: RefCell::new(None),
+            control_window: RefCell::new(None),
+            control_application: RefCell::new(None),
+            show_system_notification: RefCell::new(None),
+            dismiss_system_notification: RefCell::new(None),
             request_path_prompt: RefCell::new(None),
             request_prompt: RefCell::new(None),
             next_path_prompt_id: Cell::new(1),
             pending_path_prompts: RefCell::new(HashMap::new()),
             pending_new_path_prompts: RefCell::new(HashMap::new()),
             next_prompt_id: Cell::new(1),
+            next_auxiliary_window_id: Cell::new(1),
+            next_system_notification_id: Cell::new(1),
+            system_notification_ids: RefCell::new(HashMap::new()),
             pending_prompts: RefCell::new(HashMap::new()),
             persistent_uris: RefCell::new(HashMap::new()),
             cursor_style: Cell::new(CursorStyle::Arrow),
@@ -353,6 +465,22 @@ impl OhosPlatform {
             window.borrow_mut().frame_requested = true;
         }
         self.dispatcher.request_main_wake();
+    }
+
+    fn send_application_command(&self, command: u32, operation: &str) {
+        let result = self
+            .control_application
+            .borrow()
+            .as_ref()
+            .cloned()
+            .context("HarmonyOS application-control bridge is not configured")
+            .and_then(|callback| callback(command));
+        if let Err(error) = result {
+            log_message(
+                LogLevel::Error,
+                format!("failed to {operation} the HarmonyOS application: {error:#}"),
+            );
+        }
     }
 
     fn active_window_state(&self) -> Option<Rc<RefCell<WindowState>>> {
@@ -402,7 +530,9 @@ impl OhosPlatform {
 
         let windows = self.windows.borrow().clone();
         for window in windows {
-            let component = window.borrow().component;
+            let Some(component) = window.borrow().component else {
+                continue;
+            };
             match apply_pending_surface_resize(component) {
                 Ok(Some((width, height))) => {
                     self.handle_surface_event(
@@ -447,8 +577,16 @@ impl OhosPlatform {
         &self,
         callback: Arc<dyn Fn() -> Result<()> + Send + Sync>,
         open_external_url: Arc<dyn Fn(String) -> Result<()> + Send + Sync>,
+        open_external_path: Arc<dyn Fn(String, bool) -> Result<()> + Send + Sync>,
         set_cursor: Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>,
-        set_auxiliary_window: AuxiliaryWindowCallback,
+        control_window: WindowControlCallback,
+        control_application: ApplicationControlCallback,
+        show_system_notification: Arc<
+            dyn Fn(u32, String, String, String, Vec<String>, Vec<String>) -> Result<()>
+                + Send
+                + Sync,
+        >,
+        dismiss_system_notification: Arc<dyn Fn(u32, String) -> Result<()> + Send + Sync>,
         request_path_prompt: Arc<
             dyn Fn(u32, bool, bool, bool, bool, Option<String>, Option<String>) -> Result<()>
                 + Send
@@ -462,9 +600,14 @@ impl OhosPlatform {
     ) -> Result<()> {
         self.dispatcher.install_wake_callback(callback);
         self.open_external_url.replace(Some(open_external_url));
+        self.open_external_path.replace(Some(open_external_path));
         self.set_cursor.replace(Some(set_cursor));
-        self.set_auxiliary_window
-            .replace(Some(set_auxiliary_window));
+        self.control_window.replace(Some(control_window));
+        self.control_application.replace(Some(control_application));
+        self.show_system_notification
+            .replace(Some(show_system_notification));
+        self.dismiss_system_notification
+            .replace(Some(dismiss_system_notification));
         self.notify_cursor();
         self.request_path_prompt.replace(Some(request_path_prompt));
         self.request_prompt.replace(Some(request_prompt));
@@ -495,13 +638,23 @@ impl OhosPlatform {
         for window in windows {
             let resize = {
                 let mut state = window.borrow_mut();
+                let scale_ratio = state.scale_factor / scale_factor;
+                state.bounds = scale_window_bounds(state.bounds, scale_ratio);
+                state.windowed_bounds = scale_window_bounds(state.windowed_bounds, scale_ratio);
                 state.scale_factor = scale_factor;
                 state.surface_size.map(|(width, height)| {
                     let size = Size::new(
                         px(width as f32 / scale_factor),
                         px(height as f32 / scale_factor),
                     );
-                    state.bounds = Bounds::new(Point::default(), size);
+                    let origin = point(
+                        px(f32::from(state.screen_origin.x) / scale_factor),
+                        px(f32::from(state.screen_origin.y) / scale_factor),
+                    );
+                    state.bounds = Bounds::new(origin, size);
+                    if !state.maximized && !state.fullscreen {
+                        state.windowed_bounds = state.bounds;
+                    }
                     (size, state.primary, state.callbacks.resize.take())
                 })
             };
@@ -689,6 +842,60 @@ impl OhosPlatform {
         }
     }
 
+    fn open_external_path(&self, path: &Path, reveal: bool) {
+        let Some(open_external_path) = self.open_external_path.borrow().as_ref().cloned() else {
+            log_message(
+                LogLevel::Error,
+                format!(
+                    "cannot {} {} before ArkUI is configured",
+                    if reveal { "reveal" } else { "open" },
+                    path.display()
+                ),
+            );
+            return;
+        };
+        if let Err(error) = open_external_path(path.to_string_lossy().into_owned(), reveal) {
+            log_message(
+                LogLevel::Error,
+                format!(
+                    "failed to ask HarmonyOS to {} {}: {error:#}",
+                    if reveal { "reveal" } else { "open" },
+                    path.display()
+                ),
+            );
+        }
+    }
+
+    fn handle_system_notification_response(&self, tag: String, action_id: Option<String>) {
+        let mut callback = self
+            .callbacks
+            .borrow_mut()
+            .system_notification_response
+            .take();
+        if let Some(callback) = callback.as_mut() {
+            callback(SystemNotificationResponse {
+                tag: tag.into(),
+                action_id: action_id.map(Into::into),
+            });
+        }
+        if let Some(callback) = callback {
+            self.callbacks.borrow_mut().system_notification_response = Some(callback);
+        }
+    }
+
+    fn system_notification_id(&self, tag: &str) -> u32 {
+        if let Some(id) = self.system_notification_ids.borrow().get(tag).copied() {
+            return id;
+        }
+        let id = self.next_system_notification_id.get();
+        self.next_system_notification_id
+            .set(id.wrapping_add(1).max(1));
+        self.system_notification_ids
+            .borrow_mut()
+            .insert(tag.to_owned(), id);
+        id
+    }
+
     fn handle_native_event(&self, window: &Rc<RefCell<WindowState>>, event: NativeEvent) {
         self.dispatcher.drain_main_queue();
         match event {
@@ -716,20 +923,144 @@ impl OhosPlatform {
         }
     }
 
-    fn dispatch_arkui_key_event(&self, event: ArkUiKeyEvent) -> bool {
+    fn dispatch_arkui_key_event(&self, window_id: u32, event: ArkUiKeyEvent) -> bool {
         self.dispatcher.drain_main_queue();
-        let Some(window) = self.active_window_state() else {
+        let Some(window) = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|window| window.borrow().native_window_id == window_id)
+            .cloned()
+        else {
             return false;
         };
         dispatch_key(&window, event)
     }
 
-    fn close_auxiliary_window(&self) {
+    fn dispatch_arkui_file_drop_event(
+        &self,
+        window_id: u32,
+        kind: u32,
+        x: f32,
+        y: f32,
+        uris: Vec<String>,
+    ) -> Result<()> {
+        self.dispatcher.drain_main_queue();
         let window = self
             .windows
             .borrow()
             .iter()
-            .find(|window| !window.borrow().primary)
+            .find(|window| window.borrow().native_window_id == window_id)
+            .cloned()
+            .with_context(|| {
+                format!("HarmonyOS file-drop event targeted unknown window {window_id}")
+            })?;
+        let position = point(px(x), px(y));
+        let resolve_paths = || {
+            uris.iter()
+                .map(|uri| crate::path_prompt::resolve_uri(uri))
+                .collect::<Result<_>>()
+                .map(ExternalPaths)
+        };
+
+        match kind {
+            0 => {
+                let paths = resolve_paths()?;
+                if !paths.paths().is_empty() {
+                    dispatch_input(
+                        &window,
+                        PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }),
+                    );
+                }
+            }
+            1 => {
+                dispatch_input(
+                    &window,
+                    PlatformInput::FileDrop(FileDropEvent::Pending { position }),
+                );
+            }
+            2 => {
+                dispatch_input(&window, PlatformInput::FileDrop(FileDropEvent::Exited));
+            }
+            3 => {
+                let paths = resolve_paths()?;
+                if !paths.paths().is_empty() {
+                    dispatch_input(
+                        &window,
+                        PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }),
+                    );
+                    dispatch_input(
+                        &window,
+                        PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+                    );
+                }
+                dispatch_input(&window, PlatformInput::FileDrop(FileDropEvent::Ended));
+            }
+            _ => bail!("unknown HarmonyOS file-drop event kind {kind}"),
+        }
+        Ok(())
+    }
+
+    fn install_window_component(
+        &self,
+        window: &Rc<RefCell<WindowState>>,
+        component: XComponentHandle,
+    ) -> Result<()> {
+        if self.windows.borrow().iter().any(|candidate| {
+            !Rc::ptr_eq(candidate, window) && candidate.borrow().component == Some(component)
+        }) {
+            bail!("HarmonyOS XComponent is already attached to another GPUI window");
+        }
+        window.borrow_mut().component = Some(component);
+        let weak_window = Rc::downgrade(window);
+        if let Err(error) = set_event_handler(
+            component,
+            Box::new(move |event| {
+                let Some(window) = weak_window.upgrade() else {
+                    return;
+                };
+                CURRENT_PLATFORM.with_borrow(|current| {
+                    if let Some(platform) = current.as_ref() {
+                        platform.handle_native_event(&window, event);
+                    }
+                });
+            }),
+        ) {
+            window.borrow_mut().component = None;
+            return Err(error);
+        }
+        window.borrow_mut().frame_requested = true;
+        self.request_frame();
+        Ok(())
+    }
+
+    fn attach_auxiliary_window(&self, window_id: u32) -> Result<()> {
+        let window = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|window| window.borrow().native_window_id == window_id)
+            .cloned()
+            .with_context(|| format!("unknown HarmonyOS auxiliary window {window_id}"))?;
+        if window.borrow().primary {
+            bail!("the primary HarmonyOS window cannot be attached as an auxiliary window");
+        }
+        let component = xcomponent_by_id(&format!("zed-auxiliary-surface-{window_id}"))?;
+        if window.borrow().component == Some(component) {
+            return Ok(());
+        }
+        self.install_window_component(&window, component)
+    }
+
+    fn close_auxiliary_window(&self, window_id: u32) {
+        let window = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|window| {
+                let state = window.borrow();
+                !state.primary && state.native_window_id == window_id
+            })
             .cloned();
         let Some(window) = window else {
             return;
@@ -744,22 +1075,69 @@ impl OhosPlatform {
         }
     }
 
+    fn update_arkui_window_state(
+        &self,
+        window_id: u32,
+        physical_left: i32,
+        physical_top: i32,
+        maximized: bool,
+        fullscreen: bool,
+    ) -> Result<()> {
+        let window = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|window| window.borrow().native_window_id == window_id)
+            .cloned()
+            .with_context(|| format!("unknown HarmonyOS window {window_id}"))?;
+        let mut moved = {
+            let mut state = window.borrow_mut();
+            let origin = point(
+                px(physical_left as f32 / state.scale_factor),
+                px(physical_top as f32 / state.scale_factor),
+            );
+            let changed = state.bounds.origin != origin;
+            state.bounds.origin = origin;
+            state.screen_origin = point(px(physical_left as f32), px(physical_top as f32));
+            state.maximized = maximized;
+            state.fullscreen = fullscreen;
+            if !maximized && !fullscreen {
+                state.windowed_bounds.origin = origin;
+            }
+            changed.then(|| state.callbacks.moved.take()).flatten()
+        };
+        if let Some(callback) = moved.as_mut() {
+            callback();
+        }
+        if let Some(callback) = moved {
+            window.borrow_mut().callbacks.moved = Some(callback);
+        }
+        Ok(())
+    }
+
     fn release_window(&self, window: &Rc<RefCell<WindowState>>) {
-        let (component, primary, title) = {
+        let (component, primary, window_id, title) = {
             let state = window.borrow();
-            (state.component, state.primary, state.title.clone())
+            (
+                state.component,
+                state.primary,
+                state.native_window_id,
+                state.title.clone(),
+            )
         };
         self.windows
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, window));
-        clear_event_handler(component);
+        if let Some(component) = component {
+            clear_event_handler(component);
+        }
         if !primary
-            && let Some(set_auxiliary_window) = self.set_auxiliary_window.borrow().as_ref().cloned()
-            && let Err(error) = set_auxiliary_window(false, title, 0, 0)
+            && let Some(control_window) = self.control_window.borrow().as_ref().cloned()
+            && let Err(error) = control_window(window_id, WINDOW_COMMAND_CLOSE, title, 0, 0, 0, 0)
         {
             log_message(
                 LogLevel::Error,
-                format!("failed to hide the HarmonyOS auxiliary window: {error:#}"),
+                format!("failed to close HarmonyOS window {window_id}: {error:#}"),
             );
         }
     }
@@ -777,7 +1155,10 @@ impl OhosPlatform {
                         px(width as f32 / state.scale_factor),
                         px(height as f32 / state.scale_factor),
                     );
-                    state.bounds = Bounds::new(Point::default(), size);
+                    state.bounds = Bounds::new(state.bounds.origin, size);
+                    if !state.maximized && !state.fullscreen {
+                        state.windowed_bounds = state.bounds;
+                    }
                     state.frame_requested = true;
                     let callback = state.callbacks.resize.take();
                     (size, state.scale_factor, state.primary, callback)
@@ -843,12 +1224,22 @@ impl Platform for OhosPlatform {
         }
     }
 
-    fn restart(&self, _binary_path: Option<PathBuf>) {
-        log_message(LogLevel::Warning, "process restart is owned by HarmonyOS");
+    fn restart(&self, binary_path: Option<PathBuf>) {
+        if binary_path.is_some() {
+            log_message(
+                LogLevel::Warning,
+                "HarmonyOS cannot restart the application with a replacement binary path",
+            );
+        }
+        self.send_application_command(APPLICATION_COMMAND_RESTART, "restart");
     }
 
-    fn activate(&self, _ignoring_other_apps: bool) {}
-    fn hide(&self) {}
+    fn activate(&self, _ignoring_other_apps: bool) {
+        self.send_application_command(APPLICATION_COMMAND_ACTIVATE, "activate");
+    }
+    fn hide(&self) {
+        self.send_application_command(APPLICATION_COMMAND_BACKGROUND, "move to the background");
+    }
     fn hide_other_apps(&self) {}
     fn unhide_other_apps(&self) {}
 
@@ -865,28 +1256,33 @@ impl Platform for OhosPlatform {
             .map(|window| window.borrow().handle)
     }
 
+    fn window_stack(&self) -> Option<Vec<AnyWindowHandle>> {
+        Some(
+            self.windows
+                .borrow()
+                .iter()
+                .map(|window| window.borrow().handle)
+                .collect(),
+        )
+    }
+
     fn open_window(
         &self,
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
         let primary = self.windows.borrow().is_empty();
-        if !primary && self.windows.borrow().len() >= 2 {
-            bail!("HarmonyOS currently exposes one workspace and one auxiliary window");
-        }
-        let component = if primary {
-            self.component
+        let window_id = if primary {
+            0
         } else {
-            xcomponent_by_id("zed-settings-surface")?
+            let window_id = self.next_auxiliary_window_id.get();
+            self.next_auxiliary_window_id.set(
+                window_id
+                    .checked_add(1)
+                    .context("HarmonyOS window ID space exhausted")?,
+            );
+            window_id
         };
-        if self
-            .windows
-            .borrow()
-            .iter()
-            .any(|window| window.borrow().component == component)
-        {
-            bail!("HarmonyOS XComponent is already attached to a GPUI window");
-        }
         let title = options
             .titlebar
             .as_ref()
@@ -896,6 +1292,16 @@ impl Platform for OhosPlatform {
         let auxiliary_window = if primary {
             None
         } else {
+            let left = physical_window_coordinate(
+                options.bounds.origin.x,
+                self.scale_factor.get(),
+                "left",
+            )?;
+            let top = physical_window_coordinate(
+                options.bounds.origin.y,
+                self.scale_factor.get(),
+                "top",
+            )?;
             let width = physical_window_dimension(
                 options.bounds.size.width,
                 self.scale_factor.get(),
@@ -907,19 +1313,21 @@ impl Platform for OhosPlatform {
                 "height",
             )?;
             let callback = self
-                .set_auxiliary_window
+                .control_window
                 .borrow()
                 .as_ref()
                 .cloned()
-                .context("HarmonyOS auxiliary-window bridge is not configured")?;
-            Some((callback, width, height))
+                .context("HarmonyOS window-control bridge is not configured")?;
+            Some((callback, left, top, width, height))
         };
         let atlas = OhosAtlas::new();
         let state = Rc::new(RefCell::new(WindowState {
             handle,
-            component,
+            component: None,
+            native_window_id: window_id,
             primary,
             bounds: options.bounds,
+            windowed_bounds: options.bounds,
             scale_factor: self.scale_factor.get(),
             mouse_position: Point::default(),
             modifiers: Modifiers::default(),
@@ -931,7 +1339,8 @@ impl Platform for OhosPlatform {
             title: title.clone(),
             active: true,
             hovered: false,
-            fullscreen: primary,
+            maximized: false,
+            fullscreen: false,
             surface_available: false,
             surface_size: None,
             screen_origin: Point::default(),
@@ -947,33 +1356,27 @@ impl Platform for OhosPlatform {
             }
         }
         self.windows.borrow_mut().push(state.clone());
-        let weak_state = Rc::downgrade(&state);
-        if let Err(error) = set_event_handler(
-            component,
-            Box::new(move |event| {
-                let Some(state) = weak_state.upgrade() else {
-                    return;
-                };
-                CURRENT_PLATFORM.with_borrow(|current| {
-                    if let Some(platform) = current.as_ref() {
-                        platform.handle_native_event(&state, event);
-                    }
-                });
-            }),
-        ) {
-            self.windows
-                .borrow_mut()
-                .retain(|window| !Rc::ptr_eq(window, &state));
-            return Err(error);
-        }
         if primary {
-            self.display.bounds.replace(options.bounds);
-        } else if let Some((set_auxiliary_window, width, height)) = auxiliary_window {
-            if let Err(error) = set_auxiliary_window(true, title, width, height) {
+            if let Err(error) = self.install_window_component(&state, self.component) {
                 self.windows
                     .borrow_mut()
                     .retain(|window| !Rc::ptr_eq(window, &state));
-                clear_event_handler(component);
+                return Err(error);
+            }
+            self.display.bounds.replace(options.bounds);
+        } else if let Some((control_window, left, top, width, height)) = auxiliary_window {
+            if let Err(error) = control_window(
+                window_id,
+                WINDOW_COMMAND_OPEN,
+                title,
+                left,
+                top,
+                width,
+                height,
+            ) {
+                self.windows
+                    .borrow_mut()
+                    .retain(|window| !Rc::ptr_eq(window, &state));
                 return Err(error);
             }
         }
@@ -1112,17 +1515,11 @@ impl Platform for OhosPlatform {
     }
 
     fn reveal_path(&self, path: &Path) {
-        log_message(
-            LogLevel::Info,
-            format!("requested reveal for {}", path.display()),
-        );
+        self.open_external_path(path, true);
     }
 
     fn open_with_system(&self, path: &Path) {
-        log_message(
-            LogLevel::Info,
-            format!("requested system open for {}", path.display()),
-        );
+        self.open_external_path(path, false);
     }
 
     fn on_quit(&self, callback: Box<dyn FnMut()>) {
@@ -1162,6 +1559,65 @@ impl Platform for OhosPlatform {
     }
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
         self.callbacks.borrow_mut().validate_app_menu_command = Some(callback);
+    }
+
+    fn show_system_notification(&self, notification: SystemNotification) {
+        let tag = notification.tag.to_string();
+        let id = self.system_notification_id(&tag);
+        let Some(show_notification) = self.show_system_notification.borrow().as_ref().cloned()
+        else {
+            log_message(
+                LogLevel::Error,
+                "cannot show a system notification before ArkUI is configured",
+            );
+            return;
+        };
+        let (action_ids, action_labels) = notification
+            .actions
+            .into_iter()
+            .map(|action| (action.id.to_string(), action.label.to_string()))
+            .unzip();
+        if let Err(error) = show_notification(
+            id,
+            tag,
+            notification.title.to_string(),
+            notification.body.to_string(),
+            action_ids,
+            action_labels,
+        ) {
+            log_message(
+                LogLevel::Error,
+                format!("failed to show a HarmonyOS system notification: {error:#}"),
+            );
+        }
+    }
+
+    fn dismiss_system_notification(&self, tag: &str) {
+        let Some(id) = self.system_notification_ids.borrow().get(tag).copied() else {
+            return;
+        };
+        let Some(dismiss_notification) =
+            self.dismiss_system_notification.borrow().as_ref().cloned()
+        else {
+            log_message(
+                LogLevel::Error,
+                "cannot dismiss a system notification before ArkUI is configured",
+            );
+            return;
+        };
+        if let Err(error) = dismiss_notification(id, tag.to_owned()) {
+            log_message(
+                LogLevel::Error,
+                format!("failed to dismiss HarmonyOS notification {tag:?}: {error:#}"),
+            );
+        }
+    }
+
+    fn on_system_notification_response(
+        &self,
+        callback: Box<dyn FnMut(SystemNotificationResponse)>,
+    ) {
+        self.callbacks.borrow_mut().system_notification_response = Some(callback);
     }
 
     fn thermal_state(&self) -> ThermalState {
@@ -1306,9 +1762,11 @@ struct WindowCallbacks {
 
 struct WindowState {
     handle: AnyWindowHandle,
-    component: XComponentHandle,
+    component: Option<XComponentHandle>,
+    native_window_id: u32,
     primary: bool,
     bounds: Bounds<Pixels>,
+    windowed_bounds: Bounds<Pixels>,
     scale_factor: f32,
     mouse_position: Point<Pixels>,
     modifiers: Modifiers,
@@ -1320,6 +1778,7 @@ struct WindowState {
     title: String,
     active: bool,
     hovered: bool,
+    maximized: bool,
     fullscreen: bool,
     surface_available: bool,
     surface_size: Option<(u32, u32)>,
@@ -1332,6 +1791,36 @@ struct WindowState {
 }
 
 struct OhosWindow(Rc<RefCell<WindowState>>);
+
+impl OhosWindow {
+    fn send_window_command(&self, command: u32, width: u32, height: u32) -> Result<()> {
+        let (window_id, title) = {
+            let state = self.0.borrow();
+            (state.native_window_id, state.title.clone())
+        };
+        CURRENT_PLATFORM.with_borrow(|current| {
+            let platform = current
+                .as_ref()
+                .context("GPUI platform is unavailable while controlling a window")?;
+            let callback = platform
+                .control_window
+                .borrow()
+                .as_ref()
+                .cloned()
+                .context("HarmonyOS window-control bridge is not configured")?;
+            callback(window_id, command, title, 0, 0, width, height)
+        })
+    }
+
+    fn send_window_command_and_log(&self, command: u32, operation: &str) {
+        if let Err(error) = self.send_window_command(command, 0, 0) {
+            log_message(
+                LogLevel::Error,
+                format!("failed to {operation} the HarmonyOS window: {error:#}"),
+            );
+        }
+    }
+}
 
 impl Drop for OhosWindow {
     fn drop(&mut self) {
@@ -1366,47 +1855,39 @@ impl PlatformWindow for OhosWindow {
         self.0.borrow().bounds
     }
     fn is_maximized(&self) -> bool {
-        self.0.borrow().primary
+        self.0.borrow().maximized
     }
     fn window_bounds(&self) -> WindowBounds {
-        if self.0.borrow().primary {
-            WindowBounds::Fullscreen(self.bounds())
+        let state = self.0.borrow();
+        if state.fullscreen {
+            WindowBounds::Fullscreen(state.windowed_bounds)
+        } else if state.maximized {
+            WindowBounds::Maximized(state.windowed_bounds)
         } else {
-            WindowBounds::Windowed(self.bounds())
+            WindowBounds::Windowed(state.bounds)
         }
     }
     fn content_size(&self) -> Size<Pixels> {
         self.bounds().size
     }
     fn resize(&mut self, size: Size<Pixels>) {
-        let (primary, title, scale_factor) = {
+        let scale_factor = {
             let mut state = self.0.borrow_mut();
             state.bounds.size = size;
-            (state.primary, state.title.clone(), state.scale_factor)
+            if !state.maximized && !state.fullscreen {
+                state.windowed_bounds = state.bounds;
+            }
+            state.scale_factor
         };
-        if primary {
-            return;
-        }
         let result = (|| -> Result<()> {
             let width = physical_window_dimension(size.width, scale_factor, "width")?;
             let height = physical_window_dimension(size.height, scale_factor, "height")?;
-            CURRENT_PLATFORM.with_borrow(|current| {
-                let platform = current
-                    .as_ref()
-                    .context("GPUI platform is unavailable while resizing a window")?;
-                let callback = platform
-                    .set_auxiliary_window
-                    .borrow()
-                    .as_ref()
-                    .cloned()
-                    .context("HarmonyOS auxiliary-window bridge is not configured")?;
-                callback(true, title, width, height)
-            })
+            self.send_window_command(WINDOW_COMMAND_RESIZE, width, height)
         })();
         if let Err(error) = result {
             log_message(
                 LogLevel::Error,
-                format!("failed to resize the HarmonyOS auxiliary window: {error:#}"),
+                format!("failed to resize the HarmonyOS window: {error:#}"),
             );
         }
     }
@@ -1459,29 +1940,7 @@ impl PlatformWindow for OhosWindow {
             for window in platform.windows.borrow().iter() {
                 window.borrow_mut().active = Rc::ptr_eq(window, &self.0);
             }
-            if !self.0.borrow().primary {
-                let (title, size, scale_factor) = {
-                    let state = self.0.borrow();
-                    (state.title.clone(), state.bounds.size, state.scale_factor)
-                };
-                let result = (|| -> Result<()> {
-                    let width = physical_window_dimension(size.width, scale_factor, "width")?;
-                    let height = physical_window_dimension(size.height, scale_factor, "height")?;
-                    let callback = platform
-                        .set_auxiliary_window
-                        .borrow()
-                        .as_ref()
-                        .cloned()
-                        .context("HarmonyOS auxiliary-window bridge is not configured")?;
-                    callback(true, title, width, height)
-                })();
-                if let Err(error) = result {
-                    log_message(
-                        LogLevel::Error,
-                        format!("failed to activate the HarmonyOS auxiliary window: {error:#}"),
-                    );
-                }
-            }
+            self.send_window_command_and_log(WINDOW_COMMAND_SHOW, "activate");
         });
     }
     fn is_active(&self) -> bool {
@@ -1495,6 +1954,7 @@ impl PlatformWindow for OhosWindow {
     }
     fn set_title(&mut self, title: &str) {
         self.0.borrow_mut().title = title.to_owned();
+        self.send_window_command_and_log(WINDOW_COMMAND_SET_TITLE, "update the title of");
     }
     fn get_title(&self) -> String {
         self.0.borrow().title.clone()
@@ -1502,11 +1962,18 @@ impl PlatformWindow for OhosWindow {
     fn set_background_appearance(&self, appearance: WindowBackgroundAppearance) {
         self.0.borrow_mut().background = appearance;
     }
-    fn minimize(&self) {}
-    fn zoom(&self) {}
+    fn minimize(&self) {
+        self.send_window_command_and_log(WINDOW_COMMAND_MINIMIZE, "minimize");
+    }
+    fn zoom(&self) {
+        let maximized = self.0.borrow().maximized;
+        self.0.borrow_mut().maximized = !maximized;
+        self.send_window_command_and_log(WINDOW_COMMAND_TOGGLE_MAXIMIZE, "toggle maximize for");
+    }
     fn toggle_fullscreen(&self) {
         let fullscreen = self.0.borrow().fullscreen;
         self.0.borrow_mut().fullscreen = !fullscreen;
+        self.send_window_command_and_log(WINDOW_COMMAND_TOGGLE_FULLSCREEN, "toggle fullscreen for");
     }
     fn is_fullscreen(&self) -> bool {
         self.0.borrow().fullscreen
@@ -1566,6 +2033,10 @@ impl PlatformWindow for OhosWindow {
             let state = self.0.borrow();
             (state.component, state.atlas.clone())
         };
+        let Some(component) = component else {
+            self.0.borrow_mut().frame_requested = true;
+            return;
+        };
         if let Err(error) = with_surface(component, |surface| surface.draw_scene(scene, &atlas)) {
             log_message(
                 LogLevel::Error,
@@ -1604,6 +2075,27 @@ fn physical_window_dimension(dimension: Pixels, scale_factor: f32, name: &str) -
         bail!("HarmonyOS window {name} {physical} is outside the supported physical range");
     }
     Ok(physical.round() as u32)
+}
+
+fn scale_window_bounds(bounds: Bounds<Pixels>, ratio: f32) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            px(f32::from(bounds.origin.x) * ratio),
+            px(f32::from(bounds.origin.y) * ratio),
+        ),
+        Size::new(
+            px(f32::from(bounds.size.width) * ratio),
+            px(f32::from(bounds.size.height) * ratio),
+        ),
+    )
+}
+
+fn physical_window_coordinate(coordinate: Pixels, scale_factor: f32, name: &str) -> Result<i32> {
+    let physical = f32::from(coordinate) * scale_factor;
+    if !physical.is_finite() || physical < i32::MIN as f32 || physical > i32::MAX as f32 {
+        bail!("HarmonyOS window {name} {physical} is outside the supported physical range");
+    }
+    Ok(physical.round() as i32)
 }
 
 fn cursor_style_code(style: CursorStyle) -> u32 {

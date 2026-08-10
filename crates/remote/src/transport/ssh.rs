@@ -39,6 +39,24 @@ use util::{
 /// How long to wait for SSH to connect when no askpass prompt has opened.
 const SSH_CONNECTION_PROMPT_TIMEOUT: Duration = Duration::from_secs(17);
 
+#[cfg(target_env = "ohos")]
+fn packaged_ssh_executable(name: &str) -> PathBuf {
+    let private_home = std::env::var_os("HNP_PRIVATE_HOME")
+        .unwrap_or_else(|| std::ffi::OsString::from("/data/app"));
+    Path::new(&private_home)
+        .join("zedtools.org")
+        .join("zedtools_0.8.0")
+        .join("bin")
+        .join(name)
+}
+
+fn new_ssh_command(name: &str) -> util::command::Command {
+    #[cfg(target_env = "ohos")]
+    return util::command::new_command(packaged_ssh_executable(name));
+    #[cfg(not(target_env = "ohos"))]
+    return util::command::new_command(name);
+}
+
 pub(crate) struct SshRemoteConnection {
     socket: SshSocket,
     master_process: Mutex<Option<MasterProcess>>,
@@ -160,6 +178,7 @@ struct MasterProcess {
 impl MasterProcess {
     pub fn new(
         askpass_script_path: &std::ffi::OsStr,
+        #[cfg(target_env = "ohos")] askpass_socket_path: &std::ffi::OsStr,
         additional_args: Vec<String>,
         socket_path: &std::path::Path,
         destination: &str,
@@ -173,7 +192,7 @@ impl MasterProcess {
             "-o",
         ];
 
-        let mut master_process = util::command::new_command("ssh");
+        let mut master_process = new_ssh_command("ssh");
         master_process
             .kill_on_drop(true)
             .stdin(Stdio::null())
@@ -183,6 +202,8 @@ impl MasterProcess {
             .env("SSH_ASKPASS", askpass_script_path)
             .args(additional_args)
             .args(args);
+        #[cfg(target_env = "ohos")]
+        master_process.env("ZED_ASKPASS_SOCKET", askpass_socket_path);
 
         master_process.arg(format!("ControlPath={}", socket_path.display()));
 
@@ -223,7 +244,7 @@ impl MasterProcess {
             &format!("echo '{}'; exec $0", Self::CONNECTION_ESTABLISHED_MAGIC),
         ];
 
-        let mut master_process = util::command::new_command("ssh");
+        let mut master_process = new_ssh_command("ssh");
         master_process
             .kill_on_drop(true)
             .stdin(Stdio::null())
@@ -540,7 +561,7 @@ async fn find_existing_control_master(
 ) -> Option<PathBuf> {
     // Use `ssh -G` to resolve the user's effective SSH config for this host.
     // This expands ControlPath tokens (%h, %p, %r, %C, etc.) into actual paths.
-    let output = match util::command::new_command("ssh")
+    let output = match new_ssh_command("ssh")
         .args(additional_args)
         .arg("-G")
         .arg(destination)
@@ -573,7 +594,7 @@ async fn find_existing_control_master(
     })?;
 
     // Verify the master is actually alive by sending a control command.
-    let check = match util::command::new_command("ssh")
+    let check = match new_ssh_command("ssh")
         .args(additional_args)
         .args(["-O", "check"])
         .arg("-o")
@@ -651,6 +672,8 @@ impl SshRemoteConnection {
             let socket_path = temp_dir.path().join("ssh.sock");
             let mut master_process = MasterProcess::new(
                 askpass.script_path().as_ref(),
+                #[cfg(target_env = "ohos")]
+                askpass.socket_path().as_ref(),
                 connection_options.additional_args(),
                 &socket_path,
                 &destination,
@@ -1174,7 +1197,9 @@ impl SshRemoteConnection {
         /// These arguments exist for `ssh` but don't exist / don't have the same semantic for `scp`.
         const SSH_DENY_ARGS_FOR_SCP: &[&str] = &["-X", "-Y"];
 
-        let mut command = util::command::new_command("scp");
+        let mut command = new_ssh_command("scp");
+        #[cfg(target_env = "ohos")]
+        command.arg("-S").arg(packaged_ssh_executable("ssh"));
         self.socket
             .ssh_options(&mut command, false, Some(SSH_DENY_ARGS_FOR_SCP))
             .args(
@@ -1199,7 +1224,9 @@ impl SshRemoteConnection {
         // these arguments exist for "ssh" but don't exist / don't have the same semantic for "sftp"
         const SSH_DENY_ARGS_FOR_SFTP: &[&str] = &["-X", "-Y"];
 
-        let mut command = util::command::new_command("sftp");
+        let mut command = new_ssh_command("sftp");
+        #[cfg(target_env = "ohos")]
+        command.arg("-S").arg(packaged_ssh_executable("ssh"));
         self.socket
             .ssh_options(&mut command, false, Some(SSH_DENY_ARGS_FOR_SFTP))
             .args(
@@ -1271,7 +1298,10 @@ impl SshRemoteConnection {
     }
 
     async fn is_sftp_available() -> bool {
-        which::which("sftp").is_ok()
+        #[cfg(target_env = "ohos")]
+        return packaged_ssh_executable("sftp").is_file();
+        #[cfg(not(target_env = "ohos"))]
+        return which::which("sftp").is_ok();
     }
 }
 
@@ -1326,7 +1356,7 @@ impl SshSocket {
         args: &[impl AsRef<str>],
         allow_pseudo_tty: bool,
     ) -> util::command::Command {
-        let mut command = util::command::new_command("ssh");
+        let mut command = new_ssh_command("ssh");
         let program = shell_kind.prepend_command_prefix(program);
         let mut to_run = shell_kind
             .try_quote_prefix_aware(&program)

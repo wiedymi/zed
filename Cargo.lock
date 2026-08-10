@@ -24054,6 +24054,7 @@ dependencies = [
  "acp_tools",
  "agent_ui",
  "anyhow",
+ "askpass",
  "assets",
  "channel",
  "client",

@@ -6,28 +6,56 @@ import {
   EnvironmentCallback,
   Permissions,
   UIAbility,
+  Want,
+  WantAgent,
   abilityAccessCtrl,
-  common
+  common,
+  wantAgent
 } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { picker } from '@kit.CoreFileKit';
+import { fileUri, picker } from '@kit.CoreFileKit';
 import { pointer } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import {
-  prepareAuxiliaryWindow,
-  setAuxiliaryWindowVisibility
-} from '../entryability/AuxiliaryWindow';
+import { notificationManager } from '@kit.NotificationKit';
+import { controlWindow, setWindowStateHandler } from '../entryability/AuxiliaryWindow';
+import { setNotificationResponseHandler } from '../entryability/NativeBridge';
+import { dispatchFileDrag, FileDropNativeContext, fileDropTypes } from '../entryability/FileDrop';
 
 const LOG_DOMAIN = 0xD002;
 const LOG_TAG = 'ZedOHOS';
 const FILE_ACCESS_PERSIST: Permissions = 'ohos.permission.FILE_ACCESS_PERSIST';
 
-interface ZedNativeContext {
+enum ApplicationCommand {
+  ACTIVATE = 0,
+  BACKGROUND = 1,
+  RESTART = 2
+}
+
+interface ZedNativeContext extends FileDropNativeContext {
   initializeFrameScheduler(
     requestFrame: () => void,
     openExternalUrl: (url: string) => void,
+    openExternalPath: (path: string, reveal: boolean) => void,
     setCursor: (style: number, visible: boolean) => void,
-    setAuxiliaryWindow: (visible: boolean, title: string, width: number, height: number) => void,
+    controlWindow: (
+      windowId: number,
+      command: number,
+      title: string,
+      left: number,
+      top: number,
+      width: number,
+      height: number
+    ) => void,
+    controlApplication: (command: number) => void,
+    showSystemNotification: (
+      id: number,
+      tag: string,
+      title: string,
+      body: string,
+      actionIds: Array<string>,
+      actionLabels: Array<string>
+    ) => void,
+    dismissSystemNotification: (id: number, tag: string) => void,
     requestPathPrompt: (
       requestId: number,
       files: boolean,
@@ -51,6 +79,7 @@ interface ZedNativeContext {
   ): void;
   setScaleFactor(scaleFactor: number): void;
   dispatchKeyEvent(
+    windowId: number,
     action: number,
     code: number,
     keyText: string,
@@ -59,9 +88,16 @@ interface ZedNativeContext {
   ): boolean;
   setLifecyclePhase(phase: number): void;
   handleMemoryWarning(): void;
+  updateWindowState(
+    windowId: number,
+    physicalLeft: number,
+    physicalTop: number,
+    maximized: boolean,
+    fullscreen: boolean
+  ): void;
   completePathPrompt(requestId: number, paths: Array<string>, error?: string): void;
   completePrompt(requestId: number, answer?: number, error?: string): void;
-  closeAuxiliaryWindow(): void;
+  handleSystemNotificationResponse(tag: string, actionId?: string): void;
   onFrame(): void;
 }
 
@@ -115,6 +151,7 @@ struct Index {
       modifiers |= 4;
     }
     return nativeContext.dispatchKeyEvent(
+      0,
       event.type,
       event.keyCode,
       event.keyText,
@@ -123,11 +160,125 @@ struct Index {
     );
   }
 
+  private createNotificationWantAgent(
+    requestCode: number,
+    tag: string,
+    actionId: string
+  ): Promise<WantAgent> {
+    const targetWant: Want = {
+      bundleName: 'dev.zed.Zed',
+      abilityName: 'EntryAbility',
+      parameters: {
+        'zed.notification.tag': tag,
+        'zed.notification.action': actionId
+      }
+    };
+    const info: wantAgent.WantAgentInfo = {
+      wants: [targetWant],
+      actionType: wantAgent.OperationType.START_ABILITY,
+      requestCode: requestCode,
+      actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
+    };
+    return wantAgent.getWantAgent(info);
+  }
+
+  private async publishSystemNotification(
+    abilityContext: common.UIAbilityContext,
+    id: number,
+    tag: string,
+    title: string,
+    body: string,
+    actionIds: Array<string>,
+    actionLabels: Array<string>
+  ): Promise<void> {
+    if (actionIds.length !== actionLabels.length) {
+      throw new Error('System notification action IDs and labels have different lengths');
+    }
+    if (!await notificationManager.isNotificationEnabled()) {
+      await notificationManager.requestEnableNotification(abilityContext);
+    }
+    const bodyWantAgent = await this.createNotificationWantAgent(id * 64, tag, '');
+    const actionButtons: Array<notificationManager.NotificationActionButton> = [];
+    for (let index = 0; index < actionIds.length; index += 1) {
+      const actionId = actionIds[index];
+      const actionLabel = actionLabels[index];
+      const actionWantAgent = await this.createNotificationWantAgent(
+        id * 64 + index + 1,
+        tag,
+        actionId
+      );
+      actionButtons.push({
+        title: actionLabel,
+        wantAgent: actionWantAgent
+      });
+    }
+    const request: notificationManager.NotificationRequest = {
+      id: id,
+      label: tag,
+      notificationSlotType: notificationManager.SlotType.OTHER_TYPES,
+      content: {
+        notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+        normal: {
+          title: title,
+          text: body
+        }
+      },
+      wantAgent: bodyWantAgent,
+      actionButtons: actionButtons,
+      tapDismissed: true
+    };
+    await notificationManager.publish(request);
+  }
+
+  private controlApplication(
+    abilityContext: common.UIAbilityContext,
+    command: number
+  ): void {
+    let operation: Promise<void>;
+    switch (command as ApplicationCommand) {
+      case ApplicationCommand.ACTIVATE:
+        controlWindow(0, 2, '', 0, 0, 0, 0);
+        operation = abilityContext.startAbility({
+          bundleName: 'dev.zed.Zed',
+          abilityName: 'EntryAbility'
+        });
+        break;
+      case ApplicationCommand.BACKGROUND:
+        operation = abilityContext.moveAbilityToBackground();
+        break;
+      case ApplicationCommand.RESTART:
+        operation = abilityContext.restartApp({
+          bundleName: 'dev.zed.Zed',
+          abilityName: 'EntryAbility'
+        });
+        break;
+      default:
+        hilog.error(
+          LOG_DOMAIN,
+          LOG_TAG,
+          'Unknown application command %{public}d',
+          command
+        );
+        return;
+    }
+    operation.catch((error: Error): void => {
+      hilog.error(
+        LOG_DOMAIN,
+        LOG_TAG,
+        'Failed to apply application command %{public}d: %{public}s',
+        command,
+        JSON.stringify(error)
+      );
+    });
+  }
+
   aboutToDisappear(): void {
     this.unregisterLifecycle?.();
     this.unregisterLifecycle = undefined;
     this.unregisterEnvironment?.();
     this.unregisterEnvironment = undefined;
+    setNotificationResponseHandler(undefined);
+    setWindowStateHandler(undefined);
     this.nativeContext?.setLifecyclePhase(2);
   }
 
@@ -159,6 +310,31 @@ struct Index {
             }).catch((error: Error) => {
               hilog.error(LOG_DOMAIN, LOG_TAG, 'Failed to open external URL: %{public}s', JSON.stringify(error));
             });
+          }, (path: string, reveal: boolean) => {
+            try {
+              const uri = fileUri.getUriFromPath(path);
+              abilityContext.startAbility({
+                action: reveal ? 'ohos.want.action.select' : 'ohos.want.action.viewData',
+                uri: uri
+              }).catch((error: Error) => {
+                hilog.error(
+                  LOG_DOMAIN,
+                  LOG_TAG,
+                  'Failed to %{public}s external path %{public}s: %{public}s',
+                  reveal ? 'reveal' : 'open',
+                  path,
+                  JSON.stringify(error)
+                );
+              });
+            } catch (error) {
+              hilog.error(
+                LOG_DOMAIN,
+                LOG_TAG,
+                'Failed to convert external path %{public}s to a URI: %{public}s',
+                path,
+                JSON.stringify(error)
+              );
+            }
           }, (style: number, visible: boolean) => {
             const cursorController = uiContext.getCursorController();
             const cursorStyles: Array<pointer.PointerStyle> = [
@@ -185,8 +361,53 @@ struct Index {
             const cursorStyle = cursorStyles[style] ?? pointer.PointerStyle.DEFAULT;
             cursorController.setCursor(cursorStyle);
             pointer.setPointerVisibleSync(visible);
-          }, (visible: boolean, title: string, width: number, height: number) => {
-            setAuxiliaryWindowVisibility(visible, title, width, height);
+          }, (
+            windowId: number,
+            command: number,
+            title: string,
+            left: number,
+            top: number,
+            width: number,
+            height: number
+          ) => {
+            controlWindow(windowId, command, title, left, top, width, height);
+          }, (command: number) => {
+            this.controlApplication(abilityContext, command);
+          }, (
+            id: number,
+            tag: string,
+            title: string,
+            body: string,
+            actionIds: Array<string>,
+            actionLabels: Array<string>
+          ) => {
+            this.publishSystemNotification(
+              abilityContext,
+              id,
+              tag,
+              title,
+              body,
+              actionIds,
+              actionLabels
+            ).catch((error: Error): void => {
+              hilog.error(
+                LOG_DOMAIN,
+                LOG_TAG,
+                'Failed to publish system notification %{public}s: %{public}s',
+                tag,
+                JSON.stringify(error)
+              );
+            });
+          }, (id: number, tag: string) => {
+            notificationManager.cancel(id, tag).catch((error: Error): void => {
+              hilog.error(
+                LOG_DOMAIN,
+                LOG_TAG,
+                'Failed to dismiss system notification %{public}s: %{public}s',
+                tag,
+                JSON.stringify(error)
+              );
+            });
           }, (
             requestId: number,
             files: boolean,
@@ -301,22 +522,27 @@ struct Index {
               zedContext.completePrompt(requestId, undefined, `Unable to open dialog: ${JSON.stringify(error)}`);
             }
           }, uiContext, scaleFactor, abilityContext.filesDir, abilityContext.cacheDir);
-          setTimeout((): void => {
-            prepareAuxiliaryWindow()
-              .then((): void => {
-                zedContext.setScaleFactor(scaleFactor);
-                zedContext.onFrame();
-                frameCallback.request(uiContext);
-              })
-              .catch((error: Error): void => {
-                hilog.error(
-                  LOG_DOMAIN,
-                  LOG_TAG,
-                  'Failed to prepare the Settings window: %{public}s',
-                  JSON.stringify(error)
-                );
-              });
-          }, 3000);
+          setWindowStateHandler((
+            windowId: number,
+            physicalLeft: number,
+            physicalTop: number,
+            maximized: boolean,
+            fullscreen: boolean
+          ): void => {
+            zedContext.updateWindowState(
+              windowId,
+              physicalLeft,
+              physicalTop,
+              maximized,
+              fullscreen
+            );
+          });
+          setNotificationResponseHandler((tag: string, actionId?: string): void => {
+            zedContext.handleSystemNotificationResponse(tag, actionId);
+          });
+          zedContext.setScaleFactor(scaleFactor);
+          zedContext.onFrame();
+          frameCallback.request(uiContext);
           const applicationContext = abilityContext.getApplicationContext();
           const lifecycleCallback: AbilityLifecycleCallback = {
             onAbilityCreate: (_ability: UIAbility): void => {},
@@ -359,6 +585,11 @@ struct Index {
         })
         .onKeyPreIme((event: KeyEvent): boolean => this.dispatchNativeKeyEvent(event))
         .onKeyEvent((event: KeyEvent): boolean => this.dispatchNativeKeyEvent(event))
+        .onDragEnter((event: DragEvent): void => dispatchFileDrag(this.nativeContext, 0, 0, event))
+        .onDragMove((event: DragEvent): void => dispatchFileDrag(this.nativeContext, 0, 1, event))
+        .onDragLeave((event: DragEvent): void => dispatchFileDrag(this.nativeContext, 0, 2, event))
+        .onDrop((event: DragEvent): void => dispatchFileDrag(this.nativeContext, 0, 3, event))
+        .allowDrop(fileDropTypes)
         .onAreaChange(() => {
           const nativeContext = this.nativeContext;
           if (nativeContext) {

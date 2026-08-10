@@ -3814,7 +3814,18 @@ impl GitBinary {
 
         if !self.is_trusted {
             command.args(["-c", "core.hooksPath=/dev/null"]);
+            #[cfg(not(target_env = "ohos"))]
             command.args(["-c", "core.sshCommand=ssh"]);
+            #[cfg(target_env = "ohos")]
+            if let Some(tools_root) = ohos_git_tools_root(&self.git_binary_path) {
+                command.args([
+                    "-c".to_owned(),
+                    format!(
+                        "core.sshCommand={}",
+                        tools_root.join("bin").join("ssh").display()
+                    ),
+                ]);
+            }
             command.args(["-c", "credential.helper="]);
             command.args(["-c", "protocol.ext.allow=never"]);
             command.args(["-c", "diff.external="]);
@@ -3840,7 +3851,9 @@ impl GitBinary {
         }
         #[cfg(target_env = "ohos")]
         if let Some(tools_root) = ohos_git_tools_root(&self.git_binary_path) {
+            let ssh_binary = tools_root.join("bin").join("ssh");
             command.env("GIT_EXEC_PATH", tools_root.join("libexec").join("git-core"));
+            command.env("GIT_SSH_COMMAND", &ssh_binary);
             command.env(
                 "GIT_TEMPLATE_DIR",
                 tools_root.join("share").join("git-core").join("templates"),
@@ -3922,7 +3935,7 @@ async fn run_git_command(
                 .env("GIT_CONFIG_VALUE_0", gpg_wrapper);
         }
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_env = "ohos"))]
         command.env("ZED_ASKPASS_SOCKET", ask_pass.socket_path());
         let git_process = command.spawn()?;
 

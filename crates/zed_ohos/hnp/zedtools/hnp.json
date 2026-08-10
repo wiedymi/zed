@@ -1,7 +1,7 @@
 {
   "type": "hnp-config",
   "name": "zedtools",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "install": {
     "links": [
       { "source": "/bin/zed-hnp-probe", "target": "zed-hnp-probe" },
@@ -11,6 +11,10 @@
       { "source": "/bin/node", "target": "node" },
       { "source": "/bin/npm", "target": "npm" },
       { "source": "/bin/npx", "target": "npx" },
+      { "source": "/bin/ssh", "target": "ssh" },
+      { "source": "/bin/scp", "target": "scp" },
+      { "source": "/bin/sftp", "target": "sftp" },
+      { "source": "/bin/zed-askpass", "target": "zed-askpass" },
       { "source": "/bin/toybox", "target": "basename" },
       { "source": "/bin/toybox", "target": "cat" },
       { "source": "/bin/toybox", "target": "chgrp" },

@@ -110,7 +110,6 @@ use remote::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use session::AppSession;
-#[cfg(not(target_env = "ohos"))]
 use settings::DefaultOpenBehavior;
 use settings::{
     CenteredPaddingSettings, Settings, SettingsLocation, SettingsStore, update_settings_file,
@@ -686,12 +685,6 @@ fn prompt_and_open_paths(
     create_new_window: bool,
     cx: &mut App,
 ) {
-    #[cfg(target_env = "ohos")]
-    let workspace_window = cx
-        .windows()
-        .into_iter()
-        .find_map(|window| window.downcast::<MultiWorkspace>());
-    #[cfg(not(target_env = "ohos"))]
     let workspace_window = workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
         .into_iter()
         .next();
@@ -798,17 +791,12 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
         .on_action(|_: &Reload, cx| reload(cx))
         .on_action(|action: &Open, cx: &mut App| {
             let app_state = AppState::global(cx);
-            #[cfg(target_env = "ohos")]
-            let create_new_window = false;
-            #[cfg(not(target_env = "ohos"))]
             let create_new_window = action.create_new_window.unwrap_or_else(|| {
                 matches!(
                     WorkspaceSettings::get_global(cx).default_open_behavior,
                     DefaultOpenBehavior::NewWindow
                 )
             });
-            #[cfg(target_env = "ohos")]
-            let _ = action;
             prompt_and_open_paths(
                 app_state,
                 PathPromptOptions {
@@ -832,7 +820,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
                     multiple: true,
                     prompt: None,
                 },
-                !cfg!(target_env = "ohos"),
+                true,
                 cx,
             );
         });

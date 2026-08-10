@@ -56,6 +56,9 @@ $ToyboxBinary = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\toybox-ohos'
 $GitBundle = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\git-ohos.tar'
 $GitBundleStamp = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\git-ohos.patch.sha256'
 $GitPatch = Join-Path $RepositoryRoot 'crates\zed_ohos\hnp\git-ohos.patch'
+$OpenSshBundle = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\openssh-ohos.tar'
+$OpenSshBundleStamp = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\openssh-ohos.inputs.sha256'
+$AskpassSource = Join-Path $RepositoryRoot 'crates\zed_ohos\hnp\zed-askpass.c'
 $NodeBundle = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\node-ohos.tar'
 $NodeBundleStamp = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\node-ohos.inputs.sha256'
 $NodePatch = Join-Path $RepositoryRoot 'crates\zed_ohos\hnp\node-ohos.patch'
@@ -68,6 +71,8 @@ $DashSourceCommit = '4bbf8721a3ac6401ced6a0454956801f6ba37256'
 $GitSourceCommit = 'c44beea485f0f2feaf460e2ac87fdd5608d63cf0'
 $CurlSourceCommit = 'cfbfb65047e85e6b08af65fe9cdbcf68e9ad496a'
 $OpenSslSourceCommit = '0893a62353583343eb712adef6debdfbe597c227'
+$OpenSshSourceCommit = 'e8dd756725e8800fcd0b3fd71ee6b4382d1e8fab'
+$OpenSshBuildRevision = '1'
 $NodeVersion = '22.23.2'
 $NodeSourceCommit = 'aa4c77582be995286fc6e00aaf530dc7ade102a9'
 $NodeBuildRevision = '2'
@@ -299,6 +304,96 @@ tar -C /tmp/git-stage -cf /work/target/zed-ohos-hnp/git-ohos.tar .
     Set-Content -LiteralPath $GitBundleStamp -Value $ExpectedPatchHash -NoNewline
 }
 
+function Build-HnpOpenSsh {
+    $CompilerHash = (Get-FileHash -LiteralPath $ToyboxCompiler -Algorithm SHA256).Hash
+    $ExpectedInputStamp = @(
+        $OpenSshBuildRevision,
+        $OpenSshSourceCommit,
+        $OpenSslSourceCommit,
+        $CompilerHash
+    ) -join "`n"
+    $CachedInputStamp = if (Test-Path -LiteralPath $OpenSshBundleStamp -PathType Leaf) {
+        (Get-Content -LiteralPath $OpenSshBundleStamp -Raw).Trim()
+    } else {
+        $null
+    }
+    if (
+        (Test-Path -LiteralPath $OpenSshBundle -PathType Leaf) -and
+        $CachedInputStamp -eq $ExpectedInputStamp
+    ) {
+        return
+    }
+    if ($null -eq (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw 'Docker is required to build OpenSSH for the HarmonyOS HNP'
+    }
+
+    $OpenSshBuildCommand = @"
+set -eu
+apk add --no-cache build-base autoconf automake git clang lld llvm linux-headers perl >/dev/null
+rm -rf /tmp/openssl /tmp/openssh /tmp/deps /tmp/openssh-stage /tmp/empty
+mkdir -p /tmp/deps /tmp/openssh-stage/bin /tmp/empty
+llvm-ar rc /tmp/empty/libssp_nonshared.a
+compiler=/work/crates/zed_ohos/hnp/ohos-clang.sh
+git clone --quiet --depth 1 --branch openssl-3.5.2 https://github.com/openssl/openssl.git /tmp/openssl
+test "`$(git -C /tmp/openssl rev-parse HEAD)" = "$OpenSslSourceCommit"
+cd /tmp/openssl
+CC="`$compiler" AR=llvm-ar RANLIB=llvm-ranlib ./Configure linux-x86_64 no-shared no-tests no-apps no-docs no-module no-legacy --prefix=/tmp/deps --libdir=lib >/dev/null
+make -s -j8 build_libs >/dev/null
+make -s install_dev >/dev/null 2>&1
+git init --quiet /tmp/openssh
+git -C /tmp/openssh remote add origin https://github.com/openssh/openssh-portable.git
+git -C /tmp/openssh fetch --quiet --depth 1 origin $OpenSshSourceCommit
+git -C /tmp/openssh checkout --quiet FETCH_HEAD
+test "`$(git -C /tmp/openssh rev-parse HEAD)" = "$OpenSshSourceCommit"
+cd /tmp/openssh
+autoreconf -fi >/dev/null
+ac_cv_header_linux_if_tun_h=no \
+ac_cv_header_linux_if_h=no \
+ac_cv_header_linux_seccomp_h=no \
+ac_cv_header_linux_filter_h=no \
+ac_cv_header_linux_audit_h=no \
+CC="`$compiler" AR=llvm-ar RANLIB=llvm-ranlib \
+CFLAGS=-I/tmp/deps/include LDFLAGS='-L/tmp/deps/lib -L/tmp/empty' \
+./configure \
+  --build=x86_64-alpine-linux-musl \
+  --host=x86_64-pc-linux-gnu \
+  --prefix=/usr \
+  --sysconfdir=/etc/ssh \
+  --with-ssl-dir=/tmp/deps \
+  --without-zlib \
+  --without-pam \
+  --without-selinux \
+  --without-libedit \
+  --without-kerberos5 \
+  --without-xauth \
+  --without-shadow \
+  --with-sandbox=no \
+  --disable-strip >/dev/null
+make -j8 ssh scp sftp >/dev/null
+cp ssh scp sftp /tmp/openssh-stage/bin/
+tar -C /tmp/openssh-stage -cf /work/target/zed-ohos-hnp/openssh-ohos.tar .
+"@
+    Invoke-Checked {
+        & docker run --rm `
+            -v "${RepositoryRoot}:/work" `
+            -v "${SdkRoot}:/ohos:ro" `
+            -w /work `
+            $DashBuilderImage `
+            sh -lc $OpenSshBuildCommand
+    } 'OHOS OpenSSH cross-build'
+    foreach ($Executable in @('ssh', 'scp', 'sftp')) {
+        $VerificationDirectory = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\openssh-verify'
+        New-Item -ItemType Directory -Path $VerificationDirectory -Force | Out-Null
+        Invoke-Checked {
+            tar -xf $OpenSshBundle -C $VerificationDirectory "./bin/$Executable"
+        } "HarmonyOS OpenSSH $Executable verification staging"
+        if (-not (Test-OhosExecutable -Path (Join-Path $VerificationDirectory "bin\$Executable"))) {
+            throw "OpenSSH did not produce an OHOS $Executable executable"
+        }
+    }
+    Set-Content -LiteralPath $OpenSshBundleStamp -Value $ExpectedInputStamp -NoNewline
+}
+
 function Build-HnpNode {
     if ($ReuseExistingNodeBundle) {
         if (-not (Test-Path -LiteralPath $NodeBundle -PathType Leaf)) {
@@ -494,6 +589,7 @@ function Build-Hnp {
         $ToyboxConfig,
         $ToyboxCompiler,
         $GitPatch,
+        $AskpassSource,
         $NodePatch,
         $NodeToolSource,
         $NodeCompiler
@@ -515,6 +611,7 @@ function Build-Hnp {
     Build-HnpShell
     Build-HnpTools
     Build-HnpGit
+    Build-HnpOpenSsh
     Build-HnpNode
     Copy-Item -LiteralPath (Join-Path $HnpSourceDirectory 'hnp.json') -Destination $HnpStagingDirectory -Force
     Copy-Item -LiteralPath $DashBinary -Destination (Join-Path $HnpStagingDirectory 'bin\sh') -Force
@@ -525,12 +622,23 @@ function Build-Hnp {
     Invoke-Checked {
         tar -xf $NodeBundle -C $HnpStagingDirectory
     } 'HarmonyOS Node.js package staging'
+    Invoke-Checked {
+        tar -xf $OpenSshBundle -C $HnpStagingDirectory
+    } 'HarmonyOS OpenSSH package staging'
     if (-not (Test-OhosExecutable -Path (Join-Path $HnpStagingDirectory 'bin\git'))) {
         throw 'The staged Git executable is not a HarmonyOS binary'
     }
     if (-not (Test-OhosExecutable -Path (Join-Path $HnpStagingDirectory 'bin\node'))) {
         throw 'The staged Node.js executable is not a HarmonyOS binary'
     }
+    foreach ($Executable in @('ssh', 'scp', 'sftp')) {
+        if (-not (Test-OhosExecutable -Path (Join-Path $HnpStagingDirectory "bin\$Executable"))) {
+            throw "The staged OpenSSH $Executable executable is not a HarmonyOS binary"
+        }
+    }
+    Invoke-Checked {
+        & $Linker -std=c11 -O2 -Wall -Wextra -Werror $AskpassSource -o (Join-Path $HnpStagingDirectory 'bin\zed-askpass')
+    } 'OHOS askpass helper build'
     Invoke-Checked {
         & $Linker -std=c11 -O2 -Wall -Wextra -Werror $HnpProbeSource -o $HnpProbe
     } 'OHOS HNP probe build'

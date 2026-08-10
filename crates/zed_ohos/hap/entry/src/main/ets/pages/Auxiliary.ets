@@ -1,18 +1,24 @@
-interface ZedAuxiliaryNativeContext {
+import { dispatchFileDrag, FileDropNativeContext, fileDropTypes } from '../entryability/FileDrop';
+
+interface ZedAuxiliaryNativeContext extends FileDropNativeContext {
   setScaleFactor(scaleFactor: number): void;
   dispatchKeyEvent(
+    windowId: number,
     action: number,
     code: number,
     keyText: string,
     unicode: number | undefined,
     modifiers: number
   ): boolean;
-  closeAuxiliaryWindow(): void;
+  attachAuxiliaryWindow(windowId: number): void;
+  closeAuxiliaryWindow(windowId: number): void;
 }
 
-@Entry
+@Entry({ useSharedStorage: true })
 @Component
 struct Auxiliary {
+  @LocalStorageProp('windowId') private windowId: number = 0;
+  @LocalStorageProp('componentId') private componentId: string = '';
   private nativeContext: ZedAuxiliaryNativeContext | undefined;
 
   private dispatchNativeKeyEvent(event: KeyEvent): boolean {
@@ -31,6 +37,7 @@ struct Auxiliary {
       modifiers |= 4;
     }
     return nativeContext.dispatchKeyEvent(
+      this.windowId,
       event.type,
       event.keyCode,
       event.keyText,
@@ -40,24 +47,34 @@ struct Auxiliary {
   }
 
   aboutToDisappear(): void {
-    this.nativeContext?.closeAuxiliaryWindow();
+    this.nativeContext?.closeAuxiliaryWindow(this.windowId);
     this.nativeContext = undefined;
   }
 
   build() {
     Stack() {
       XComponent({
-        id: 'zed-settings-surface',
+        id: this.componentId,
         type: XComponentType.SURFACE,
         libraryname: 'zed_ohos'
       })
         .onLoad((nativeContext) => {
           const zedContext = nativeContext as ZedAuxiliaryNativeContext;
           this.nativeContext = zedContext;
+          zedContext.attachAuxiliaryWindow(this.windowId);
           zedContext.setScaleFactor(1 / this.getUIContext().px2vp(1));
         })
         .onKeyPreIme((event: KeyEvent): boolean => this.dispatchNativeKeyEvent(event))
         .onKeyEvent((event: KeyEvent): boolean => this.dispatchNativeKeyEvent(event))
+        .onDragEnter((event: DragEvent): void =>
+          dispatchFileDrag(this.nativeContext, this.windowId, 0, event))
+        .onDragMove((event: DragEvent): void =>
+          dispatchFileDrag(this.nativeContext, this.windowId, 1, event))
+        .onDragLeave((event: DragEvent): void =>
+          dispatchFileDrag(this.nativeContext, this.windowId, 2, event))
+        .onDrop((event: DragEvent): void =>
+          dispatchFileDrag(this.nativeContext, this.windowId, 3, event))
+        .allowDrop(fileDropTypes)
         .onAreaChange(() => {
           this.nativeContext?.setScaleFactor(1 / this.getUIContext().px2vp(1));
         })

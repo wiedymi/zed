@@ -3,73 +3,281 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const LOG_DOMAIN = 0xD002;
 const LOG_TAG = 'ZedOHOS';
-const SETTINGS_WINDOW_NAME = 'zed-settings';
 
-let windowStage: window.WindowStage | undefined;
-let settingsWindow: window.Window | undefined;
-let settingsWindowReady: Promise<window.Window> | undefined;
-let windowOperation: Promise<void> = Promise.resolve();
-
-export function configureAuxiliaryWindowStage(stage: window.WindowStage): void {
-  windowStage = stage;
+enum WindowCommand {
+  OPEN = 0,
+  CLOSE = 1,
+  SHOW = 2,
+  MINIMIZE = 3,
+  TOGGLE_MAXIMIZE = 4,
+  TOGGLE_FULLSCREEN = 5,
+  RESIZE = 6,
+  SET_TITLE = 7
 }
 
-export function prepareAuxiliaryWindow(): Promise<window.Window> {
-  if (settingsWindow) {
-    return Promise.resolve(settingsWindow);
+let windowStage: window.WindowStage | undefined;
+let mainWindow: window.Window | undefined;
+const auxiliaryWindows: Map<number, window.Window> = new Map();
+const observedWindowIds: Set<number> = new Set();
+let windowOperation: Promise<void> = Promise.resolve();
+let windowStateHandler: ((
+  windowId: number,
+  physicalLeft: number,
+  physicalTop: number,
+  maximized: boolean,
+  fullscreen: boolean
+) => void) | undefined;
+
+class AuxiliaryPageStorage {
+  windowId: number;
+  componentId: string;
+
+  constructor(windowId: number) {
+    this.windowId = windowId;
+    this.componentId = `zed-auxiliary-surface-${windowId}`;
   }
-  if (settingsWindowReady) {
-    return settingsWindowReady;
+}
+
+export function configureWindowStage(stage: window.WindowStage): void {
+  windowStage = stage;
+  stage.getMainWindow().then((resolvedWindow: window.Window): void => {
+    mainWindow = resolvedWindow;
+    observeWindow(0, resolvedWindow);
+  }).catch((error: Error): void => {
+    hilog.error(LOG_DOMAIN, LOG_TAG, 'Failed to obtain the main window: %{public}s', JSON.stringify(error));
+  });
+}
+
+function publishWindowState(windowId: number, targetWindow: window.Window): void {
+  const handler = windowStateHandler;
+  if (!handler) {
+    return;
+  }
+  try {
+    const rect = targetWindow.getWindowProperties().windowRect;
+    const status = targetWindow.getWindowStatus();
+    handler(
+      windowId,
+      rect.left,
+      rect.top,
+      status === window.WindowStatusType.MAXIMIZE,
+      status === window.WindowStatusType.FULL_SCREEN
+    );
+  } catch (error) {
+    hilog.error(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Failed to publish state for window %{public}d: %{public}s',
+      windowId,
+      JSON.stringify(error)
+    );
+  }
+}
+
+function observeWindow(windowId: number, targetWindow: window.Window): void {
+  if (observedWindowIds.has(windowId)) {
+    publishWindowState(windowId, targetWindow);
+    return;
+  }
+  try {
+    targetWindow.on('windowRectChange', (): void => {
+      publishWindowState(windowId, targetWindow);
+    });
+    targetWindow.on('windowStatusChange', (): void => {
+      publishWindowState(windowId, targetWindow);
+    });
+    observedWindowIds.add(windowId);
+    publishWindowState(windowId, targetWindow);
+  } catch (error) {
+    hilog.error(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Failed to observe state for window %{public}d: %{public}s',
+      windowId,
+      JSON.stringify(error)
+    );
+  }
+}
+
+function stopObservingWindow(windowId: number, targetWindow: window.Window): void {
+  if (!observedWindowIds.delete(windowId)) {
+    return;
+  }
+  try {
+    targetWindow.off('windowRectChange');
+    targetWindow.off('windowStatusChange');
+  } catch (error) {
+    hilog.error(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Failed to stop observing window %{public}d: %{public}s',
+      windowId,
+      JSON.stringify(error)
+    );
+  }
+}
+
+export function setWindowStateHandler(handler: ((
+  windowId: number,
+  physicalLeft: number,
+  physicalTop: number,
+  maximized: boolean,
+  fullscreen: boolean
+) => void) | undefined): void {
+  windowStateHandler = handler;
+  if (!handler) {
+    return;
+  }
+  if (mainWindow) {
+    observeWindow(0, mainWindow);
+  }
+  auxiliaryWindows.forEach((targetWindow: window.Window, windowId: number): void => {
+    observeWindow(windowId, targetWindow);
+  });
+}
+
+async function createAuxiliaryWindow(
+  windowId: number,
+  title: string,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): Promise<window.Window> {
+  const existing = auxiliaryWindows.get(windowId);
+  if (existing) {
+    return existing;
   }
   const stage = windowStage;
   if (!stage) {
-    return Promise.reject(new Error('HarmonyOS window stage is not configured'));
+    throw new Error('HarmonyOS window stage is not configured');
   }
-  const ready = stage.createSubWindowWithOptions(SETTINGS_WINDOW_NAME, {
-    title: 'Zed — Settings',
+  const createdWindow = await stage.createSubWindowWithOptions(`zed-window-${windowId}`, {
+    title: title,
     decorEnabled: true,
     isModal: false,
     maximizeSupported: true,
     windowRect: {
-      left: 0,
-      top: 0,
-      width: 128,
-      height: 128
+      left: left,
+      top: top,
+      width: width,
+      height: height
     }
-  }).then((createdWindow: window.Window): Promise<window.Window> => {
-    settingsWindow = createdWindow;
-    return createdWindow.loadContent('pages/Auxiliary')
-      .then(() => createdWindow.showWindow({ focusOnShow: false }))
-      .then(() => createdWindow.minimize())
-      .then(() => createdWindow);
-  }).catch((error: Error): never => {
-    settingsWindow = undefined;
-    settingsWindowReady = undefined;
-    throw error;
   });
-  settingsWindowReady = ready;
-  return ready;
+  auxiliaryWindows.set(windowId, createdWindow);
+  try {
+    const storage = new LocalStorage(new AuxiliaryPageStorage(windowId));
+    await createdWindow.loadContent('pages/Auxiliary', storage);
+    await createdWindow.setWindowTitle(title);
+    await createdWindow.resize(width, height);
+    await createdWindow.showWindow();
+    observeWindow(windowId, createdWindow);
+    return createdWindow;
+  } catch (error) {
+    auxiliaryWindows.delete(windowId);
+    stopObservingWindow(windowId, createdWindow);
+    await createdWindow.destroyWindow().catch((): void => {});
+    throw new Error(`Unable to create HarmonyOS window ${windowId}: ${JSON.stringify(error)}`);
+  }
 }
 
-export function setAuxiliaryWindowVisibility(
-  visible: boolean,
-  _title: string,
+async function resolveWindow(windowId: number): Promise<window.Window> {
+  if (windowId !== 0) {
+    const auxiliaryWindow = auxiliaryWindows.get(windowId);
+    if (!auxiliaryWindow) {
+      throw new Error(`HarmonyOS auxiliary window ${windowId} does not exist`);
+    }
+    return auxiliaryWindow;
+  }
+  if (mainWindow) {
+    return mainWindow;
+  }
+  const stage = windowStage;
+  if (!stage) {
+    throw new Error('HarmonyOS window stage is not configured');
+  }
+  mainWindow = await stage.getMainWindow();
+  return mainWindow;
+}
+
+async function applyWindowCommand(
+  windowId: number,
+  command: WindowCommand,
+  title: string,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): Promise<void> {
+  if (command === WindowCommand.OPEN) {
+    await createAuxiliaryWindow(windowId, title, left, top, width, height);
+    return;
+  }
+  if (command === WindowCommand.CLOSE) {
+    if (windowId === 0) {
+      return;
+    }
+    const auxiliaryWindow = auxiliaryWindows.get(windowId);
+    if (!auxiliaryWindow) {
+      return;
+    }
+    auxiliaryWindows.delete(windowId);
+    stopObservingWindow(windowId, auxiliaryWindow);
+    await auxiliaryWindow.destroyWindow();
+    return;
+  }
+
+  const targetWindow = await resolveWindow(windowId);
+  switch (command) {
+    case WindowCommand.SHOW:
+      await targetWindow.showWindow();
+      break;
+    case WindowCommand.MINIMIZE:
+      await targetWindow.minimize();
+      break;
+    case WindowCommand.TOGGLE_MAXIMIZE:
+      if (targetWindow.getWindowStatus() === window.WindowStatusType.MAXIMIZE) {
+        await targetWindow.recover();
+      } else {
+        await targetWindow.maximize(window.MaximizePresentation.EXIT_IMMERSIVE);
+      }
+      break;
+    case WindowCommand.TOGGLE_FULLSCREEN:
+      if (targetWindow.getWindowStatus() === window.WindowStatusType.FULL_SCREEN) {
+        await targetWindow.recover();
+      } else {
+        await targetWindow.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
+      }
+      break;
+    case WindowCommand.RESIZE:
+      await targetWindow.resize(width, height);
+      break;
+    case WindowCommand.SET_TITLE:
+      await targetWindow.setWindowTitle(title);
+      break;
+    default:
+      throw new Error(`Unknown HarmonyOS window command ${command}`);
+  }
+}
+
+export function controlWindow(
+  windowId: number,
+  command: number,
+  title: string,
+  left: number,
+  top: number,
   width: number,
   height: number
 ): void {
-  windowOperation = windowOperation.then(async (): Promise<void> => {
-    const auxiliaryWindow = await prepareAuxiliaryWindow();
-    if (visible) {
-      await auxiliaryWindow.resize(width, height);
-      await auxiliaryWindow.showWindow();
-    } else {
-      await auxiliaryWindow.minimize();
-    }
+  windowOperation = windowOperation.then((): Promise<void> => {
+    return applyWindowCommand(windowId, command as WindowCommand, title, left, top, width, height);
   }).catch((error: Error): void => {
     hilog.error(
       LOG_DOMAIN,
       LOG_TAG,
-      'Failed to update the Settings window: %{public}s',
+      'Failed to apply window command %{public}d to window %{public}d: %{public}s',
+      command,
+      windowId,
       JSON.stringify(error)
     );
   });

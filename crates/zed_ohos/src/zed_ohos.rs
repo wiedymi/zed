@@ -158,8 +158,16 @@ pub fn initialize_frame_scheduler(
     env: Env,
     request_frame: Function<'_, (), ()>,
     open_external_url: Function<'_, String, ()>,
+    open_external_path: Function<'_, (String, bool), ()>,
     set_cursor: Function<'_, (u32, bool), ()>,
-    set_auxiliary_window: Function<'_, (bool, String, u32, u32), ()>,
+    control_window: Function<'_, (u32, u32, String, i32, i32, u32, u32), ()>,
+    control_application: Function<'_, u32, ()>,
+    show_system_notification: Function<
+        '_,
+        (u32, String, String, String, Vec<String>, Vec<String>),
+        (),
+    >,
+    dismiss_system_notification: Function<'_, (u32, String), ()>,
     request_path_prompt: Function<
         '_,
         (u32, bool, bool, bool, bool, Option<String>, Option<String>),
@@ -215,6 +223,19 @@ pub fn initialize_frame_scheduler(
             Err(anyhow!("N-API external URL callback returned {status}"))
         }
     });
+    let open_external_path = open_external_path
+        .build_threadsafe_function::<(String, bool)>()
+        .callee_handled::<false>()
+        .build_callback(|context| Ok(FnArgs::from(context.value)))?;
+    let open_external_path = Arc::new(move |path: String, reveal: bool| {
+        let status = open_external_path
+            .call_with_priority((path, reveal), ThreadsafeFunctionPriority::Immediate);
+        if status == Status::Ok {
+            Ok(())
+        } else {
+            Err(anyhow!("N-API external-path callback returned {status}"))
+        }
+    });
     let set_cursor = set_cursor
         .build_threadsafe_function::<(u32, bool)>()
         .callee_handled::<false>()
@@ -228,23 +249,83 @@ pub fn initialize_frame_scheduler(
             Err(anyhow!("N-API cursor callback returned {status}"))
         }
     });
-    let set_auxiliary_window = set_auxiliary_window
-        .build_threadsafe_function::<(bool, String, u32, u32)>()
+    let control_window = control_window
+        .build_threadsafe_function::<(u32, u32, String, i32, i32, u32, u32)>()
         .callee_handled::<false>()
         .build_callback(|context| Ok(FnArgs::from(context.value)))?;
-    let set_auxiliary_window = Arc::new(
-        move |visible: bool, title: String, width: u32, height: u32| {
-            let status = set_auxiliary_window.call_with_priority(
-                (visible, title, width, height),
+    let control_window = Arc::new(
+        move |window_id: u32,
+              command: u32,
+              title: String,
+              left: i32,
+              top: i32,
+              width: u32,
+              height: u32| {
+            let status = control_window.call_with_priority(
+                (window_id, command, title, left, top, width, height),
                 ThreadsafeFunctionPriority::Immediate,
             );
             if status == Status::Ok {
                 Ok(())
             } else {
-                Err(anyhow!("N-API auxiliary-window callback returned {status}"))
+                Err(anyhow!("N-API window-control callback returned {status}"))
             }
         },
     );
+    let control_application = control_application
+        .build_threadsafe_function::<u32>()
+        .callee_handled::<false>()
+        .build()?;
+    let control_application = Arc::new(move |command: u32| {
+        let status =
+            control_application.call_with_priority(command, ThreadsafeFunctionPriority::Immediate);
+        if status == Status::Ok {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "N-API application-control callback returned {status}"
+            ))
+        }
+    });
+    let show_system_notification = show_system_notification
+        .build_threadsafe_function::<(u32, String, String, String, Vec<String>, Vec<String>)>()
+        .callee_handled::<false>()
+        .build_callback(|context| Ok(FnArgs::from(context.value)))?;
+    let show_system_notification = Arc::new(
+        move |id: u32,
+              tag: String,
+              title: String,
+              body: String,
+              action_ids: Vec<String>,
+              action_labels: Vec<String>| {
+            let status = show_system_notification.call_with_priority(
+                (id, tag, title, body, action_ids, action_labels),
+                ThreadsafeFunctionPriority::Immediate,
+            );
+            if status == Status::Ok {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "N-API system-notification callback returned {status}"
+                ))
+            }
+        },
+    );
+    let dismiss_system_notification = dismiss_system_notification
+        .build_threadsafe_function::<(u32, String)>()
+        .callee_handled::<false>()
+        .build_callback(|context| Ok(FnArgs::from(context.value)))?;
+    let dismiss_system_notification = Arc::new(move |id: u32, tag: String| {
+        let status = dismiss_system_notification
+            .call_with_priority((id, tag), ThreadsafeFunctionPriority::Immediate);
+        if status == Status::Ok {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "N-API notification-dismiss callback returned {status}"
+            ))
+        }
+    });
     let request_path_prompt = request_path_prompt
         .build_threadsafe_function::<(u32, bool, bool, bool, bool, Option<String>, Option<String>)>(
         )
@@ -318,8 +399,12 @@ pub fn initialize_frame_scheduler(
     gpui_ohos::configure_frame_scheduler(
         schedule_frame,
         open_external_url,
+        open_external_path,
         set_cursor,
-        set_auxiliary_window,
+        control_window,
+        control_application,
+        show_system_notification,
+        dismiss_system_notification,
         request_path_prompt,
         request_prompt,
         scale_factor,
@@ -329,10 +414,69 @@ pub fn initialize_frame_scheduler(
 }
 
 #[napi]
-pub fn close_auxiliary_window() -> napi_ohos::Result<()> {
-    catch_unwind(AssertUnwindSafe(gpui_ohos::close_auxiliary_window)).map_err(|panic| {
+pub fn attach_auxiliary_window(window_id: u32) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::attach_auxiliary_window(window_id)
+    }))
+    .map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while attaching an auxiliary window: {}",
+            panic_message(panic.as_ref())
+        ))
+    })?
+    .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
+pub fn close_auxiliary_window(window_id: u32) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::close_auxiliary_window(window_id)
+    }))
+    .map_err(|panic| {
         napi_ohos::Error::from_reason(format!(
             "Zed panicked while closing an auxiliary window: {}",
+            panic_message(panic.as_ref())
+        ))
+    })
+}
+
+#[napi]
+pub fn update_window_state(
+    window_id: u32,
+    physical_left: i32,
+    physical_top: i32,
+    maximized: bool,
+    fullscreen: bool,
+) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::update_arkui_window_state(
+            window_id,
+            physical_left,
+            physical_top,
+            maximized,
+            fullscreen,
+        )
+    }))
+    .map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while updating native window state: {}",
+            panic_message(panic.as_ref())
+        ))
+    })?
+    .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
+pub fn handle_system_notification_response(
+    tag: String,
+    action_id: Option<String>,
+) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::handle_system_notification_response(tag, action_id)
+    }))
+    .map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while handling a system notification response: {}",
             panic_message(panic.as_ref())
         ))
     })
@@ -354,6 +498,7 @@ pub fn set_scale_factor(scale_factor: f64) -> napi_ohos::Result<()> {
 
 #[napi]
 pub fn dispatch_key_event(
+    window_id: u32,
     action: u32,
     code: i32,
     key_text: String,
@@ -361,7 +506,7 @@ pub fn dispatch_key_event(
     modifiers: u32,
 ) -> napi_ohos::Result<bool> {
     catch_unwind(AssertUnwindSafe(|| {
-        gpui_ohos::dispatch_arkui_key_event(action, code, key_text, unicode, modifiers)
+        gpui_ohos::dispatch_arkui_key_event(window_id, action, code, key_text, unicode, modifiers)
     }))
     .map_err(|panic| {
         napi_ohos::Error::from_reason(format!(
@@ -369,6 +514,26 @@ pub fn dispatch_key_event(
             panic_message(panic.as_ref())
         ))
     })
+}
+
+#[napi]
+pub fn dispatch_file_drop_event(
+    window_id: u32,
+    kind: u32,
+    x: f64,
+    y: f64,
+    uris: Vec<String>,
+) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::dispatch_arkui_file_drop_event(window_id, kind, x as f32, y as f32, uris)
+    }))
+    .map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while handling a file-drop event: {}",
+            panic_message(panic.as_ref())
+        ))
+    })?
+    .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
 }
 
 #[napi]
@@ -578,6 +743,9 @@ fn start_zed(sandbox_paths: SandboxPaths) -> Result<()> {
 }
 
 fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
+    let askpass_binary = gpui_ohos::packaged_executable("zed-askpass")
+        .context("locating the packaged HarmonyOS askpass helper")?;
+    askpass::set_askpass_program(askpass_binary);
     load_embedded_fonts(cx)?;
     release_channel::init(AppVersion::load(env!("CARGO_PKG_VERSION"), None, None), cx);
     gpui_tokio::init(cx);

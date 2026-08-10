@@ -17,6 +17,7 @@ gpui_ohos.workspace = true
 
 [target.'cfg(target_env = "ohos")'.dependencies]
 anyhow.workspace = true
+askpass.workspace = true
 acp_tools.workspace = true
 agent_ui.workspace = true
 assets.workspace = true

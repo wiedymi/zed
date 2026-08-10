@@ -3,13 +3,17 @@ use std::{ffi::OsString, path::PathBuf};
 use anyhow::{Result, bail, ensure};
 
 const ZED_TOOLS_PACKAGE: &str = "zedtools";
-const ZED_TOOLS_VERSION: &str = "0.7.0";
+const ZED_TOOLS_VERSION: &str = "0.8.0";
 const PROCESS_PROBE: &str = "zed-hnp-probe";
 const SYSTEM_SHELL: &str = "sh";
 const GIT: &str = "git";
 const NODE: &str = "node";
 const NPM: &str = "npm";
 const NPX: &str = "npx";
+const SSH: &str = "ssh";
+const SCP: &str = "scp";
+const SFTP: &str = "sftp";
+const ASKPASS: &str = "zed-askpass";
 
 pub fn packaged_executable(name: &str) -> Result<PathBuf> {
     if name != PROCESS_PROBE
@@ -18,6 +22,10 @@ pub fn packaged_executable(name: &str) -> Result<PathBuf> {
         && name != NODE
         && name != NPM
         && name != NPX
+        && name != SSH
+        && name != SCP
+        && name != SFTP
+        && name != ASKPASS
     {
         bail!("auxiliary executable {name:?} is not packaged for HarmonyOS");
     }
