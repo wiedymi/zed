@@ -25,6 +25,7 @@ http_client.workspace = true
 itertools.workspace = true
 log.workspace = true
 parking_lot.workspace = true
+paths.workspace = true
 regex.workspace = true
 rand = { workspace = true, optional = true }
 rope.workspace = true

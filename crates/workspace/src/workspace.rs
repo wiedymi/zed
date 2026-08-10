@@ -110,9 +110,10 @@ use remote::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use session::AppSession;
+#[cfg(not(target_env = "ohos"))]
+use settings::DefaultOpenBehavior;
 use settings::{
-    CenteredPaddingSettings, DefaultOpenBehavior, Settings, SettingsLocation, SettingsStore,
-    update_settings_file,
+    CenteredPaddingSettings, Settings, SettingsLocation, SettingsStore, update_settings_file,
 };
 
 use sqlez::{
@@ -685,11 +686,17 @@ fn prompt_and_open_paths(
     create_new_window: bool,
     cx: &mut App,
 ) {
-    if let Some(workspace_window) =
-        workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
-            .into_iter()
-            .next()
-    {
+    #[cfg(target_env = "ohos")]
+    let workspace_window = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<MultiWorkspace>());
+    #[cfg(not(target_env = "ohos"))]
+    let workspace_window = workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
+        .into_iter()
+        .next();
+
+    if let Some(workspace_window) = workspace_window {
         workspace_window
             .update(cx, |multi_workspace, window, cx| {
                 let workspace = multi_workspace.workspace().clone();
@@ -791,6 +798,17 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
         .on_action(|_: &Reload, cx| reload(cx))
         .on_action(|action: &Open, cx: &mut App| {
             let app_state = AppState::global(cx);
+            #[cfg(target_env = "ohos")]
+            let create_new_window = false;
+            #[cfg(not(target_env = "ohos"))]
+            let create_new_window = action.create_new_window.unwrap_or_else(|| {
+                matches!(
+                    WorkspaceSettings::get_global(cx).default_open_behavior,
+                    DefaultOpenBehavior::NewWindow
+                )
+            });
+            #[cfg(target_env = "ohos")]
+            let _ = action;
             prompt_and_open_paths(
                 app_state,
                 PathPromptOptions {
@@ -799,12 +817,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
                     multiple: true,
                     prompt: None,
                 },
-                action.create_new_window.unwrap_or_else(|| {
-                    matches!(
-                        WorkspaceSettings::get_global(cx).default_open_behavior,
-                        DefaultOpenBehavior::NewWindow
-                    )
-                }),
+                create_new_window,
                 cx,
             );
         })
@@ -819,7 +832,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
                     multiple: true,
                     prompt: None,
                 },
-                true,
+                !cfg!(target_env = "ohos"),
                 cx,
             );
         });
@@ -7984,6 +7997,17 @@ impl Workspace {
         })
     }
 
+    pub fn show_modal<V: ModalView>(
+        &mut self,
+        modal: Entity<V>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.modal_layer.update(cx, |modal_layer, cx| {
+            modal_layer.show_modal_entity(modal, window, cx)
+        })
+    }
+
     pub fn hide_modal(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.modal_layer
             .update(cx, |modal_layer, cx| modal_layer.hide_modal(window, cx))
@@ -9752,12 +9776,10 @@ pub async fn apply_restored_multiworkspace_state(
             let mut resolved_paths = Vec::new();
             for path in key.path_list().paths() {
                 if key.host().is_none()
-                    && let Some(common_dir) =
-                        project::discover_root_repo_common_dir(path, fs.as_ref()).await
-                    && !project::is_submodule_git_dir(&common_dir)
+                    && let Some(main_path) =
+                        project::resolve_git_worktree_to_main_repo(fs.as_ref(), path).await
                 {
-                    let main_path = project::repo_identity_path(&common_dir);
-                    resolved_paths.push(main_path.to_path_buf());
+                    resolved_paths.push(main_path);
                 } else {
                     resolved_paths.push(path.to_path_buf());
                 }
@@ -14421,6 +14443,16 @@ mod tests {
             let right_panel = cx.new(|cx| TestPanel::new_flexible(DockPosition::Right, 100, cx));
             workspace.add_panel(bottom_panel.clone(), window, cx);
             workspace.add_panel(right_panel.clone(), window, cx);
+
+            workspace.bottom_dock().update(cx, |dock, cx| {
+                dock.clamp_panel_size(Pixels::ZERO, window, cx);
+                assert_eq!(
+                    dock.stored_panel_size_state(&bottom_panel)
+                        .and_then(|state| state.size),
+                    None,
+                    "transient empty workspace bounds must not overwrite the panel size"
+                );
+            });
 
             let max_size = px(200.);
             workspace.bottom_dock().update(cx, |dock, cx| {

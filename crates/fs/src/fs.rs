@@ -533,6 +533,52 @@ impl RealFs {
         }
     }
 
+    fn git_command(&self) -> Result<util::command::Command> {
+        #[cfg(target_env = "ohos")]
+        {
+            let git_binary = self
+                .bundled_git_binary_path
+                .as_deref()
+                .context("packaged HarmonyOS Git executable is unavailable")?;
+            let canonical_git = std::fs::canonicalize(git_binary).with_context(|| {
+                format!(
+                    "resolving packaged HarmonyOS Git executable {}",
+                    git_binary.display()
+                )
+            })?;
+            let tools_root = canonical_git
+                .parent()
+                .and_then(Path::parent)
+                .context("packaged HarmonyOS Git executable has no package root")?;
+            let mut command = new_command(git_binary);
+            command.env("GIT_EXEC_PATH", tools_root.join("libexec").join("git-core"));
+            command.env(
+                "GIT_TEMPLATE_DIR",
+                tools_root.join("share").join("git-core").join("templates"),
+            );
+            command.env(
+                "GIT_SSL_CAINFO",
+                tools_root
+                    .join("share")
+                    .join("certs")
+                    .join("ca-certificates.crt"),
+            );
+            let git_metadata_root = paths::data_dir().join("git");
+            std::fs::create_dir_all(&git_metadata_root).with_context(|| {
+                format!(
+                    "creating private HarmonyOS Git metadata root at {}",
+                    git_metadata_root.display()
+                )
+            })?;
+            command.env("ZED_OHOS_GIT_METADATA_ROOT", git_metadata_root);
+            Ok(command)
+        }
+        #[cfg(not(target_env = "ohos"))]
+        {
+            Ok(new_command("git"))
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn canonicalize(path: &Path) -> Result<PathBuf> {
         use std::ffi::OsString;
@@ -1210,9 +1256,10 @@ impl Fs for RealFs {
         abs_work_directory_path: &Path,
         fallback_branch_name: String,
     ) -> Result<()> {
-        let result = new_command("git")
+        let result = self
+            .git_command()?
             .current_dir(abs_work_directory_path)
-            .args(&["config", "--global", "--get", "init.defaultBranch"])
+            .args(["config", "--global", "--get", "init.defaultBranch"])
             .output()
             .await;
 
@@ -1224,12 +1271,18 @@ impl Fs for RealFs {
             _ => fallback_branch_name,
         };
 
-        new_command("git")
+        let output = self
+            .git_command()?
             .current_dir(abs_work_directory_path)
-            .args(&["init", "-b"])
+            .args(["init", "-b"])
             .arg(branch_name.trim())
             .output()
             .await?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
 
         Ok(())
     }
@@ -1244,9 +1297,10 @@ impl Fs for RealFs {
 
         let _job_tracker = JobTracker::new(job_info, self.job_event_subscribers.clone());
 
-        let output = new_command("git")
+        let output = self
+            .git_command()?
             .current_dir(abs_work_directory)
-            .args(&["clone", repo_url])
+            .args(["clone", repo_url])
             .output()
             .await?;
 
@@ -1264,7 +1318,8 @@ impl Fs for RealFs {
     /// Will return `Ok` if the commands exit status is `0`, with the stdout
     /// contents. Otherwise returns `Err` with the stderr contents.
     async fn git_config(&self, abs_work_directory: &Path, args: Vec<String>) -> Result<String> {
-        let output = new_command("git")
+        let output = self
+            .git_command()?
             .current_dir(abs_work_directory)
             .args([String::from("config")].into_iter().chain(args))
             .output()

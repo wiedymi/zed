@@ -1068,8 +1068,12 @@ impl TerminalBuilder {
         let background_executor = cx.background_executor().clone();
         // Headless hosts (e.g. the eval CLI) have no controlling TTY, so PTY
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
-        // When set, run the command as a plain subprocess instead.
-        let no_pty = HeadlessTerminal::is_enabled(cx);
+        // OpenHarmony additionally denies HAP domains access to `/dev/ptmx`
+        // through SELinux, so an application cannot allocate a PTY even for an
+        // executable delivered by HNP. In both cases, use a piped subprocess.
+        let ohos_pipe_terminal = cfg!(target_env = "ohos");
+        let interactive_pipe = ohos_pipe_terminal && task.is_none();
+        let no_pty = HeadlessTerminal::is_enabled(cx) || ohos_pipe_terminal;
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
@@ -1092,6 +1096,58 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+
+            #[cfg(target_env = "ohos")]
+            {
+                let tools_bin = Path::new(&util::shell::get_system_shell())
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .context("HarmonyOS HNP shell path has no parent directory")?;
+                let inherited_path = env
+                    .get("PATH")
+                    .cloned()
+                    .or_else(|| std::env::var("PATH").ok())
+                    .unwrap_or_else(|| "/system/bin:/bin:/usr/bin".to_string());
+                env.insert(
+                    "PATH".to_string(),
+                    format!("{}:{inherited_path}", tools_bin.display()),
+                );
+                let tools_root = tools_bin
+                    .parent()
+                    .context("HarmonyOS HNP bin directory has no parent")?;
+                env.insert(
+                    "GIT_EXEC_PATH".to_string(),
+                    tools_root
+                        .join("libexec/git-core")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                env.insert(
+                    "GIT_TEMPLATE_DIR".to_string(),
+                    tools_root
+                        .join("share/git-core/templates")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                env.insert(
+                    "GIT_SSL_CAINFO".to_string(),
+                    tools_root
+                        .join("share/certs/ca-certificates.crt")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                let git_metadata_root = paths::data_dir().join("git");
+                std::fs::create_dir_all(&git_metadata_root).with_context(|| {
+                    format!(
+                        "creating private HarmonyOS Git metadata root at {}",
+                        git_metadata_root.display()
+                    )
+                })?;
+                env.insert(
+                    "ZED_OHOS_GIT_METADATA_ROOT".to_string(),
+                    git_metadata_root.to_string_lossy().into_owned(),
+                );
+            }
 
             #[derive(Default)]
             struct ShellParams {
@@ -1120,6 +1176,12 @@ impl TerminalBuilder {
                     if cfg!(windows) {
                         Some(ShellParams::new(
                             util::shell::get_windows_system_shell(),
+                            None,
+                            None,
+                        ))
+                    } else if cfg!(target_env = "ohos") {
+                        Some(ShellParams::new(
+                            util::shell::get_system_shell(),
                             None,
                             None,
                         ))
@@ -1180,13 +1242,18 @@ impl TerminalBuilder {
             // subprocess and pump its piped output into the same emulator the
             // PTY path would feed.
             let (terminal_type, subprocess) = if no_pty {
-                let (program, args) = match &shell_params {
+                let (program, mut args) = match &shell_params {
                     Some(params) => (
                         params.program.clone(),
                         params.args.clone().unwrap_or_default(),
                     ),
                     None => (util::shell::get_system_shell(), Vec::new()),
                 };
+                // Dash only emits prompts and applies interactive-shell
+                // behavior when explicitly asked to do so if stdin is a pipe.
+                if interactive_pipe && matches!(&shell, Shell::System) {
+                    args.push("-i".to_string());
+                }
                 let subprocess = match spawn_task_subprocess(
                     program,
                     args,
@@ -1195,6 +1262,7 @@ impl TerminalBuilder {
                     term.clone(),
                     events_tx,
                     &background_executor,
+                    interactive_pipe,
                 ) {
                     Ok(subprocess) => subprocess,
                     Err(error) => {
@@ -2067,21 +2135,30 @@ impl Terminal {
         }
     }
 
-    /// Write the Input payload to the PTY, if applicable.
-    /// (This is a no-op for display-only terminals.)
+    /// Writes input to the PTY, or to the interactive piped subprocess used on
+    /// OpenHarmony where application PTY allocation is denied by SELinux.
+    /// This remains a no-op for static display-only terminals and headless
+    /// task subprocesses whose stdin was intentionally not connected.
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.pty_write_log.borrow_mut().push(input.to_vec());
-        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-            if log::log_enabled!(log::Level::Debug) {
-                if let Ok(str) = str::from_utf8(&input) {
-                    log::debug!("Writing to PTY: {:?}", str);
-                } else {
-                    log::debug!("Writing to PTY: {:?}", input);
+        match &self.terminal_type {
+            TerminalType::Pty { pty_tx, .. } => {
+                if log::log_enabled!(log::Level::Debug) {
+                    if let Ok(str) = str::from_utf8(&input) {
+                        log::debug!("Writing to PTY: {:?}", str);
+                    } else {
+                        log::debug!("Writing to PTY: {:?}", input);
+                    }
+                }
+                pty_tx.notify(input);
+            }
+            TerminalType::DisplayOnly => {
+                if let Some(subprocess) = &self.subprocess {
+                    subprocess.write(input);
                 }
             }
-            pty_tx.notify(input);
         }
     }
 
@@ -3158,19 +3235,352 @@ fn convert_lf_to_crlf(bytes: &[u8], previous_byte_was_cr: &mut bool) -> Vec<u8> 
     converted
 }
 
-/// Owns a non-PTY task subprocess and the background task pumping its output
-/// into the terminal emulator. Used by headless hosts (e.g. the eval CLI) where
-/// PTY allocation fails with `ENOTTY`. Dropping this kills the child.
+/// Owns a non-PTY subprocess and the background tasks that connect it to the
+/// terminal emulator. Interactive instances include a small canonical-mode
+/// line editor because pipes do not provide the echo/edit/history behavior a
+/// Unix terminal driver normally supplies.
 struct SubprocessHandle {
     child: Arc<parking_lot::Mutex<Option<util::process::Child>>>,
+    input_tx: Option<futures::channel::mpsc::UnboundedSender<Vec<u8>>>,
+    _writer: Option<Task<()>>,
     _reader: Task<()>,
 }
 
 impl SubprocessHandle {
+    fn write(&self, input: Cow<'static, [u8]>) {
+        let Some(input_tx) = &self.input_tx else {
+            return;
+        };
+
+        #[cfg(unix)]
+        if input.contains(&b'\x03')
+            && let Some(child) = self.child.lock().as_ref()
+        {
+            // `util::process::Child` starts the shell in its own process group.
+            // With no PTY there is no terminal driver to turn ^C into SIGINT,
+            // so deliver the signal to the shell and its current child here.
+            let result = unsafe { libc::killpg(child.id() as i32, libc::SIGINT) };
+            if result != 0 {
+                log::warn!(
+                    "failed to interrupt piped terminal process group: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        if input_tx.unbounded_send(input.into_owned()).is_err() {
+            log::debug!("piped terminal input ignored after subprocess exit");
+        }
+    }
+
     fn kill(&self) {
         if let Some(child) = self.child.lock().as_mut() {
             child.kill().log_err();
         }
+    }
+}
+
+#[derive(Default)]
+struct PipeLineEdit {
+    display: Vec<u8>,
+    writes: Vec<Vec<u8>>,
+    close_stdin: bool,
+}
+
+/// Canonical input and local echo for an interactive shell connected through
+/// pipes. OpenHarmony HAPs cannot open `/dev/ptmx`, so this supplies the subset
+/// of terminal line discipline needed for a useful command shell without
+/// pretending that pipes support TTY ioctls or job control.
+#[derive(Default)]
+struct PipeLineEditor {
+    line: Vec<u8>,
+    cursor: usize,
+    history: Vec<Vec<u8>>,
+    history_index: Option<usize>,
+    saved_line: Vec<u8>,
+}
+
+impl PipeLineEditor {
+    fn edit(&mut self, input: &[u8]) -> PipeLineEdit {
+        let mut edit = PipeLineEdit::default();
+
+        match input {
+            b"\x1b[A" | b"\x1bOA" => {
+                self.previous_history(&mut edit.display);
+                return edit;
+            }
+            b"\x1b[B" | b"\x1bOB" => {
+                self.next_history(&mut edit.display);
+                return edit;
+            }
+            b"\x1b[C" | b"\x1bOC" => {
+                self.move_right(&mut edit.display);
+                return edit;
+            }
+            b"\x1b[D" | b"\x1bOD" => {
+                self.move_left(&mut edit.display);
+                return edit;
+            }
+            b"\x1b[H" | b"\x1bOH" | b"\x1b[1~" => {
+                self.move_home(&mut edit.display);
+                return edit;
+            }
+            b"\x1b[F" | b"\x1bOF" | b"\x1b[4~" => {
+                self.move_end(&mut edit.display);
+                return edit;
+            }
+            b"\x1b[3~" => {
+                self.delete_forward(&mut edit.display);
+                return edit;
+            }
+            _ => {}
+        }
+
+        let mut index = 0;
+        while index < input.len() {
+            match input[index] {
+                b'\r' | b'\n' => {
+                    let was_cr = input[index] == b'\r';
+                    self.commit_line(&mut edit);
+                    index += 1;
+                    if was_cr && input.get(index) == Some(&b'\n') {
+                        index += 1;
+                    }
+                }
+                b'\x03' => {
+                    self.line.clear();
+                    self.cursor = 0;
+                    self.history_index = None;
+                    self.saved_line.clear();
+                    edit.display.extend_from_slice(b"^C\r\n");
+                    index += 1;
+                }
+                b'\x04' => {
+                    if self.line.is_empty() {
+                        edit.close_stdin = true;
+                    } else {
+                        self.commit_line(&mut edit);
+                    }
+                    index += 1;
+                }
+                b'\x08' | b'\x7f' => {
+                    self.backspace(&mut edit.display);
+                    index += 1;
+                }
+                b'\x01' => {
+                    self.move_home(&mut edit.display);
+                    index += 1;
+                }
+                b'\x05' => {
+                    self.move_end(&mut edit.display);
+                    index += 1;
+                }
+                b'\x0b' => {
+                    let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+                    self.line.truncate(self.cursor);
+                    self.redraw(old_cursor_columns, &mut edit.display);
+                    index += 1;
+                }
+                b'\x15' => {
+                    let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+                    self.line.clear();
+                    self.cursor = 0;
+                    self.redraw(old_cursor_columns, &mut edit.display);
+                    index += 1;
+                }
+                b'\x17' => {
+                    self.delete_previous_word(&mut edit.display);
+                    index += 1;
+                }
+                b'\x1b' => {
+                    // Unknown escape sequences are editor commands, never
+                    // literal shell input. Ignore the remainder as one key.
+                    break;
+                }
+                byte if byte < b' ' && byte != b'\t' => index += 1,
+                _ => {
+                    let start = index;
+                    while index < input.len()
+                        && (input[index] >= b' ' || input[index] == b'\t')
+                        && input[index] != b'\x7f'
+                    {
+                        index += 1;
+                    }
+                    self.insert(&input[start..index], &mut edit.display);
+                }
+            }
+        }
+
+        edit
+    }
+
+    fn insert(&mut self, bytes: &[u8], display: &mut Vec<u8>) {
+        let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+        self.line
+            .splice(self.cursor..self.cursor, bytes.iter().copied());
+        self.cursor += bytes.len();
+        self.history_index = None;
+        self.redraw(old_cursor_columns, display);
+    }
+
+    fn backspace(&mut self, display: &mut Vec<u8>) {
+        let Some(previous) = previous_char_boundary(&self.line, self.cursor) else {
+            return;
+        };
+        let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+        self.line.drain(previous..self.cursor);
+        self.cursor = previous;
+        self.redraw(old_cursor_columns, display);
+    }
+
+    fn delete_forward(&mut self, display: &mut Vec<u8>) {
+        let Some(next) = next_char_boundary(&self.line, self.cursor) else {
+            return;
+        };
+        let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+        self.line.drain(self.cursor..next);
+        self.redraw(old_cursor_columns, display);
+    }
+
+    fn delete_previous_word(&mut self, display: &mut Vec<u8>) {
+        let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+        while let Some(previous) = previous_char_boundary(&self.line, self.cursor) {
+            let is_whitespace = String::from_utf8_lossy(&self.line[previous..self.cursor])
+                .chars()
+                .all(char::is_whitespace);
+            if !is_whitespace {
+                break;
+            }
+            self.line.drain(previous..self.cursor);
+            self.cursor = previous;
+        }
+        while let Some(previous) = previous_char_boundary(&self.line, self.cursor) {
+            let is_whitespace = String::from_utf8_lossy(&self.line[previous..self.cursor])
+                .chars()
+                .all(char::is_whitespace);
+            if is_whitespace {
+                break;
+            }
+            self.line.drain(previous..self.cursor);
+            self.cursor = previous;
+        }
+        self.redraw(old_cursor_columns, display);
+    }
+
+    fn move_left(&mut self, display: &mut Vec<u8>) {
+        if let Some(previous) = previous_char_boundary(&self.line, self.cursor) {
+            let columns = text_columns(&self.line[previous..self.cursor]);
+            self.cursor = previous;
+            push_cursor_move(display, columns, b'D');
+        }
+    }
+
+    fn move_right(&mut self, display: &mut Vec<u8>) {
+        if let Some(next) = next_char_boundary(&self.line, self.cursor) {
+            let columns = text_columns(&self.line[self.cursor..next]);
+            self.cursor = next;
+            push_cursor_move(display, columns, b'C');
+        }
+    }
+
+    fn move_home(&mut self, display: &mut Vec<u8>) {
+        let columns = text_columns(&self.line[..self.cursor]);
+        self.cursor = 0;
+        push_cursor_move(display, columns, b'D');
+    }
+
+    fn move_end(&mut self, display: &mut Vec<u8>) {
+        let columns = text_columns(&self.line[self.cursor..]);
+        self.cursor = self.line.len();
+        push_cursor_move(display, columns, b'C');
+    }
+
+    fn previous_history(&mut self, display: &mut Vec<u8>) {
+        if self.history.is_empty() {
+            return;
+        }
+        let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+        let index = match self.history_index {
+            Some(0) => 0,
+            Some(index) => index - 1,
+            None => {
+                self.saved_line = self.line.clone();
+                self.history.len() - 1
+            }
+        };
+        self.history_index = Some(index);
+        self.line = self.history[index].clone();
+        self.cursor = self.line.len();
+        self.redraw(old_cursor_columns, display);
+    }
+
+    fn next_history(&mut self, display: &mut Vec<u8>) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        let old_cursor_columns = text_columns(&self.line[..self.cursor]);
+        if index + 1 < self.history.len() {
+            self.history_index = Some(index + 1);
+            self.line = self.history[index + 1].clone();
+        } else {
+            self.history_index = None;
+            self.line = std::mem::take(&mut self.saved_line);
+        }
+        self.cursor = self.line.len();
+        self.redraw(old_cursor_columns, display);
+    }
+
+    fn commit_line(&mut self, edit: &mut PipeLineEdit) {
+        let remaining_columns = text_columns(&self.line[self.cursor..]);
+        push_cursor_move(&mut edit.display, remaining_columns, b'C');
+        edit.display.extend_from_slice(b"\r\n");
+
+        let mut command = self.line.clone();
+        command.push(b'\n');
+        edit.writes.push(command);
+        if !self.line.is_empty() && self.history.last() != Some(&self.line) {
+            self.history.push(self.line.clone());
+        }
+        self.line.clear();
+        self.cursor = 0;
+        self.history_index = None;
+        self.saved_line.clear();
+    }
+
+    fn redraw(&self, old_cursor_columns: usize, display: &mut Vec<u8>) {
+        push_cursor_move(display, old_cursor_columns, b'D');
+        display.extend_from_slice(b"\x1b[K");
+        display.extend_from_slice(&self.line);
+        push_cursor_move(display, text_columns(&self.line[self.cursor..]), b'D');
+    }
+}
+
+fn previous_char_boundary(text: &[u8], cursor: usize) -> Option<usize> {
+    let mut index = cursor.checked_sub(1)?;
+    while index > 0 && text[index] & 0b1100_0000 == 0b1000_0000 {
+        index -= 1;
+    }
+    Some(index)
+}
+
+fn next_char_boundary(text: &[u8], cursor: usize) -> Option<usize> {
+    if cursor >= text.len() {
+        return None;
+    }
+    let mut index = cursor + 1;
+    while index < text.len() && text[index] & 0b1100_0000 == 0b1000_0000 {
+        index += 1;
+    }
+    Some(index)
+}
+
+fn text_columns(text: &[u8]) -> usize {
+    String::from_utf8_lossy(text).chars().count()
+}
+
+fn push_cursor_move(display: &mut Vec<u8>, columns: usize, direction: u8) {
+    if columns > 0 {
+        display.extend_from_slice(format!("\x1b[{columns}{}", direction as char).as_bytes());
     }
 }
 
@@ -3185,8 +3595,9 @@ fn spawn_task_subprocess(
     term: Arc<AlacrittyTermLock>,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     executor: &BackgroundExecutor,
+    interactive: bool,
 ) -> Result<SubprocessHandle> {
-    use futures::io::AsyncReadExt as _;
+    use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use std::process::Stdio;
 
     let mut command = util::command::new_std_command(&program);
@@ -3196,11 +3607,60 @@ fn spawn_task_subprocess(
         command.current_dir(directory);
     }
 
-    let mut child =
-        util::process::Child::spawn(command, Stdio::null(), Stdio::piped(), Stdio::piped())?;
+    let stdin = if interactive {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    let mut child = util::process::Child::spawn(command, stdin, Stdio::piped(), Stdio::piped())?;
+    let child_stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let child = Arc::new(parking_lot::Mutex::new(Some(child)));
+
+    let (input_tx, writer) = if interactive {
+        let Some(mut child_stdin) = child_stdin else {
+            bail!("interactive subprocess did not expose piped stdin");
+        };
+        let (input_tx, mut input_rx) = unbounded::<Vec<u8>>();
+        let term = term.clone();
+        let events_tx = events_tx.clone();
+        let writer = executor.spawn(async move {
+            let mut editor = PipeLineEditor::default();
+            let mut processor = Processor::<StdSyncHandler>::new();
+            while let Some(input) = input_rx.next().await {
+                let edit = editor.edit(&input);
+                if !edit.display.is_empty() {
+                    {
+                        let mut term = term.lock();
+                        processor.advance(&mut *term, &edit.display);
+                    }
+                    events_tx
+                        .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                        .ok();
+                }
+                for bytes in edit.writes {
+                    if let Err(error) = child_stdin.write_all(&bytes).await {
+                        log::warn!("failed to write piped terminal input: {error}");
+                        return;
+                    }
+                    if let Err(error) = child_stdin.flush().await {
+                        log::warn!("failed to flush piped terminal input: {error}");
+                        return;
+                    }
+                }
+                if edit.close_stdin {
+                    if let Err(error) = child_stdin.close().await {
+                        log::warn!("failed to close piped terminal stdin: {error}");
+                    }
+                    return;
+                }
+            }
+        });
+        (Some(input_tx), Some(writer))
+    } else {
+        (None, None)
+    };
 
     let reader = executor.spawn({
         let child = child.clone();
@@ -3272,6 +3732,8 @@ fn spawn_task_subprocess(
 
     Ok(SubprocessHandle {
         child,
+        input_tx,
+        _writer: writer,
         _reader: reader,
     })
 }

@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Zed code editor for HarmonyOS"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Zed code editor"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Zed"
+    },
+    {
+      "name": "pasteboard_reason",
+      "value": "Allow Zed to paste text while you are using the editor."
+    },
+    {
+      "name": "file_access_reason",
+      "value": "Allow Zed to keep access to projects you choose in the system file picker."
+    }
+  ]
+}

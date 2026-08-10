@@ -4,9 +4,14 @@ use std::{
     task::Poll,
 };
 
+#[cfg(target_env = "ohos")]
+use std::{collections::HashSet, path::Component};
+
 use anyhow::{Context, Result};
 use async_compression::futures::bufread::{BzDecoder, GzipDecoder};
 use futures::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, io::BufReader};
+#[cfg(target_env = "ohos")]
+use futures::{FutureExt, StreamExt, future::BoxFuture};
 use sha2::{Digest, Sha256};
 
 use crate::{HttpClient, github::AssetKind};
@@ -285,6 +290,7 @@ async fn extract_tar_bz2(
     Ok(())
 }
 
+#[cfg(not(target_env = "ohos"))]
 async fn unpack_tar_archive(
     destination_path: &Path,
     url: &str,
@@ -301,6 +307,187 @@ async fn unpack_tar_archive(
         .await
         .with_context(|| format!("extracting {url} to {destination_path:?}"))?;
     Ok(())
+}
+
+#[cfg(target_env = "ohos")]
+async fn unpack_tar_archive(
+    destination_path: &Path,
+    url: &str,
+    archive_bytes: impl AsyncRead + Unpin,
+) -> Result<(), anyhow::Error> {
+    let archive = async_tar::ArchiveBuilder::new(archive_bytes)
+        .set_preserve_mtime(false)
+        .build();
+    let mut entries = archive
+        .entries()
+        .with_context(|| format!("reading entries from {url}"))?;
+    let mut deferred_links = Vec::new();
+
+    while let Some(entry) = entries.next().await {
+        let mut entry = entry.with_context(|| format!("reading an entry from {url}"))?;
+        let entry_path = entry.path()?;
+        let entry_path = normalized_archive_path(entry_path.as_ref().as_ref())?;
+        let entry_type = entry.header().entry_type();
+
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            let link_target = entry
+                .link_name()?
+                .with_context(|| format!("archive link {entry_path:?} has no target"))?;
+            let target_path = normalized_archive_link_target(
+                &entry_path,
+                link_target.as_ref().as_ref(),
+                entry_type.is_symlink(),
+            )?;
+            deferred_links.push(DeferredArchiveLink {
+                path: entry_path,
+                target: target_path,
+            });
+        } else if !entry.unpack_in(destination_path).await? {
+            anyhow::bail!("archive entry {entry_path:?} would escape {destination_path:?}");
+        }
+    }
+
+    deferred_links.sort_by(|left, right| {
+        right
+            .path
+            .components()
+            .count()
+            .cmp(&left.path.components().count())
+    });
+    for deferred_link in &deferred_links {
+        let source_path = resolve_archive_link_source(&deferred_link.target, &deferred_links)?;
+        let source_path = destination_path.join(source_path);
+        let materialized_path = destination_path.join(&deferred_link.path);
+        copy_materialized_path(&source_path, &materialized_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "materializing archive link {:?} -> {:?} from {url}",
+                    deferred_link.path, deferred_link.target
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_env = "ohos")]
+struct DeferredArchiveLink {
+    path: PathBuf,
+    target: PathBuf,
+}
+
+#[cfg(target_env = "ohos")]
+fn normalized_archive_path(path: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("archive path {path:?} is not relative and contained")
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+#[cfg(target_env = "ohos")]
+fn normalized_archive_link_target(
+    link_path: &Path,
+    target: &Path,
+    target_is_relative_to_link: bool,
+) -> Result<PathBuf> {
+    let mut normalized = if target_is_relative_to_link {
+        link_path.parent().unwrap_or(Path::new("")).to_path_buf()
+    } else {
+        PathBuf::new()
+    };
+
+    for component in target.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    anyhow::bail!(
+                        "archive link {link_path:?} points outside the archive through {target:?}"
+                    );
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("archive link {link_path:?} has absolute target {target:?}")
+            }
+        }
+    }
+
+    Ok(normalized)
+}
+
+#[cfg(target_env = "ohos")]
+fn resolve_archive_link_source(
+    source_path: &Path,
+    deferred_links: &[DeferredArchiveLink],
+) -> Result<PathBuf> {
+    let mut source_path = source_path.to_path_buf();
+    let mut visited_paths = HashSet::new();
+
+    loop {
+        if !visited_paths.insert(source_path.clone()) {
+            anyhow::bail!("archive links form a cycle at {source_path:?}");
+        }
+
+        let Some(link) = deferred_links
+            .iter()
+            .filter(|link| source_path.starts_with(&link.path))
+            .max_by_key(|link| link.path.components().count())
+        else {
+            return Ok(source_path);
+        };
+        let suffix = source_path
+            .strip_prefix(&link.path)
+            .with_context(|| format!("resolving archive link prefix {:?}", link.path))?;
+        source_path = link.target.join(suffix);
+    }
+}
+
+#[cfg(target_env = "ohos")]
+fn copy_materialized_path<'a>(
+    source: &'a Path,
+    destination: &'a Path,
+) -> BoxFuture<'a, Result<()>> {
+    async move {
+        let metadata = async_fs::metadata(source)
+            .await
+            .with_context(|| format!("reading archive link target {source:?}"))?;
+        if metadata.is_dir() {
+            async_fs::create_dir_all(destination)
+                .await
+                .with_context(|| format!("creating materialized directory {destination:?}"))?;
+            let mut entries = async_fs::read_dir(source)
+                .await
+                .with_context(|| format!("reading archive link target directory {source:?}"))?;
+            while let Some(entry) = entries.next().await {
+                let entry = entry.with_context(|| format!("reading an entry under {source:?}"))?;
+                let entry_path = entry.path();
+                let materialized_path = destination.join(entry.file_name());
+                copy_materialized_path(&entry_path, &materialized_path).await?;
+            }
+        } else if metadata.is_file() {
+            if let Some(parent) = destination.parent() {
+                async_fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("creating materialized file parent {parent:?}"))?;
+            }
+            async_fs::copy(source, destination).await.with_context(|| {
+                format!("copying materialized archive file {source:?} to {destination:?}")
+            })?;
+        } else {
+            anyhow::bail!("archive link target {source:?} is not a file or directory");
+        }
+        Ok(())
+    }
+    .boxed()
 }
 
 async fn extract_gz(

@@ -764,6 +764,38 @@ pub enum ColorSpace {
     Oklab = 1,
 }
 
+/// The renderable representation of a [`Background`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundKind {
+    /// A single color.
+    Solid(Hsla),
+    /// A two-stop linear gradient.
+    LinearGradient {
+        /// Clockwise CSS gradient angle in degrees, where zero points up.
+        angle: f32,
+        /// Color interpolation space.
+        color_space: ColorSpace,
+        /// Gradient stops and their normalized positions.
+        colors: [LinearColorStop; 2],
+    },
+    /// Repeating diagonal strokes on a transparent background.
+    PatternSlash {
+        /// Stroke color.
+        color: Hsla,
+        /// Stroke width in pixels.
+        width: f32,
+        /// Transparent interval between strokes in pixels.
+        interval: f32,
+    },
+    /// Alternating colored and transparent squares.
+    Checkerboard {
+        /// Square color.
+        color: Hsla,
+        /// Square edge length in pixels.
+        size: f32,
+    },
+}
+
 impl Display for ColorSpace {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -908,6 +940,30 @@ impl LinearColorStop {
 }
 
 impl Background {
+    /// Returns the concrete background data needed by a platform renderer.
+    pub fn kind(&self) -> BackgroundKind {
+        match self.tag {
+            BackgroundTag::Solid => BackgroundKind::Solid(self.solid),
+            BackgroundTag::LinearGradient => BackgroundKind::LinearGradient {
+                angle: self.gradient_angle_or_pattern_height,
+                color_space: self.color_space,
+                colors: self.colors,
+            },
+            BackgroundTag::PatternSlash => {
+                let encoded = self.gradient_angle_or_pattern_height;
+                BackgroundKind::PatternSlash {
+                    color: self.solid,
+                    width: (encoded / 65535.0) / 255.0,
+                    interval: (encoded % 65535.0) / 255.0,
+                }
+            }
+            BackgroundTag::Checkerboard => BackgroundKind::Checkerboard {
+                color: self.solid,
+                size: self.gradient_angle_or_pattern_height,
+            },
+        }
+    }
+
     /// Returns the solid color if this is a solid background, None otherwise.
     pub fn as_solid(&self) -> Option<Hsla> {
         if self.tag == BackgroundTag::Solid {

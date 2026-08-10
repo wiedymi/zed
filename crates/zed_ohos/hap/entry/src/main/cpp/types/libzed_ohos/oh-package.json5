@@ -1,0 +1,6 @@
+{
+  "name": "libzed_ohos.so",
+  "version": "0.1.0",
+  "description": "Rust native bridge for Zed on HarmonyOS",
+  "types": "./index.d.ts"
+}

@@ -1,0 +1,110 @@
+[package]
+name = "zed_ohos"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/zed_ohos.rs"
+
+[dependencies]
+gpui_ohos.workspace = true
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+anyhow.workspace = true
+acp_tools.workspace = true
+agent_ui.workspace = true
+assets.workspace = true
+client.workspace = true
+channel.workspace = true
+clock.workspace = true
+command_palette.workspace = true
+csv_preview.workspace = true
+db.workspace = true
+diagnostics.workspace = true
+editor.workspace = true
+encoding_selector.workspace = true
+extension.workspace = true
+extension_host.workspace = true
+extensions_ui.workspace = true
+feature_flags.workspace = true
+fs.workspace = true
+file_finder.workspace = true
+feedback.workspace = true
+futures.workspace = true
+git.workspace = true
+git_hosting_providers.workspace = true
+git_ui.workspace = true
+gpui.workspace = true
+gpui_tokio.workspace = true
+go_to_line.workspace = true
+http_client.workspace = true
+image_viewer.workspace = true
+language.workspace = true
+language_extension.workspace = true
+languages = { workspace = true, features = ["load-grammars"] }
+language_model.workspace = true
+language_models.workspace = true
+language_selector.workspace = true
+language_tools.workspace = true
+keymap_editor.workspace = true
+json_schema_store.workspace = true
+log.workspace = true
+lsp_locations.workspace = true
+line_ending_selector.workspace = true
+markdown_preview.workspace = true
+menu.workspace = true
+napi-ohos = "1.2.0"
+napi-derive-ohos = "1.2.0"
+ohos-sys = { version = "0.9.0", default-features = false, features = ["api-23", "arkui"] }
+node_runtime.workspace = true
+notifications.workspace = true
+onboarding.workspace = true
+outline.workspace = true
+outline_panel.workspace = true
+paths.workspace = true
+project.workspace = true
+project_panel.workspace = true
+project_symbols.workspace = true
+prompt_store.workspace = true
+recent_projects.workspace = true
+release_channel.workspace = true
+reqwest_client.workspace = true
+rust-embed = { workspace = true, features = ["debug-embed"] }
+search.workspace = true
+session.workspace = true
+settings.workspace = true
+settings_ui.workspace = true
+settings_profile_selector.workspace = true
+snippet_provider.workspace = true
+snippets_ui.workspace = true
+svg_preview.workspace = true
+tab_switcher.workspace = true
+theme.workspace = true
+theme_extension.workspace = true
+theme_settings.workspace = true
+terminal_view.workspace = true
+theme_selector.workspace = true
+title_bar.workspace = true
+tasks_ui.workspace = true
+toolchain_selector.workspace = true
+ui_prompt.workspace = true
+util.workspace = true
+uuid.workspace = true
+vim.workspace = true
+vim_mode_setting.workspace = true
+watch.workspace = true
+web_search.workspace = true
+web_search_providers.workspace = true
+which_key.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
+worktree.workspace = true
+
+[build-dependencies]
+napi-build-ohos = "1.2.0"

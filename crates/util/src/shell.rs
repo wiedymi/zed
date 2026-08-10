@@ -67,28 +67,62 @@ pub enum ShellKind {
 }
 
 pub fn get_system_shell() -> String {
-    if cfg!(windows) {
-        get_windows_system_shell()
-    } else {
-        std::env::var("SHELL").unwrap_or("/bin/sh".to_string())
+    #[cfg(target_env = "ohos")]
+    {
+        get_ohos_system_shell()
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        if cfg!(windows) {
+            get_windows_system_shell()
+        } else {
+            std::env::var("SHELL").unwrap_or("/bin/sh".to_string())
+        }
     }
 }
 
 pub fn get_default_system_shell() -> String {
-    if cfg!(windows) {
-        get_windows_system_shell()
-    } else {
-        "/bin/sh".to_string()
+    #[cfg(target_env = "ohos")]
+    {
+        get_ohos_system_shell()
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        if cfg!(windows) {
+            get_windows_system_shell()
+        } else {
+            "/bin/sh".to_string()
+        }
     }
 }
 
 /// Get the default system shell, preferring bash on Windows.
 pub fn get_default_system_shell_preferring_bash() -> String {
-    if cfg!(windows) {
-        get_windows_bash().unwrap_or_else(|| get_windows_system_shell())
-    } else {
-        "/bin/sh".to_string()
+    #[cfg(target_env = "ohos")]
+    {
+        get_ohos_system_shell()
     }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        if cfg!(windows) {
+            get_windows_bash().unwrap_or_else(|| get_windows_system_shell())
+        } else {
+            "/bin/sh".to_string()
+        }
+    }
+}
+
+#[cfg(target_env = "ohos")]
+fn get_ohos_system_shell() -> String {
+    let private_home = std::env::var_os("HNP_PRIVATE_HOME")
+        .unwrap_or_else(|| std::ffi::OsString::from("/data/app"));
+    Path::new(&private_home)
+        .join("zedtools.org")
+        .join("zedtools_0.7.0")
+        .join("bin")
+        .join("sh")
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub fn get_windows_bash() -> Option<String> {

@@ -136,7 +136,7 @@ metal.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
 pathfinder_geometry.workspace = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
+[target.'cfg(all(any(target_os = "linux", target_os = "freebsd", target_os = "windows"), not(target_env = "ohos")))'.dependencies]
 scap = { workspace = true, optional = true }
 
 

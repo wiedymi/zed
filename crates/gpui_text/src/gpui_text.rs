@@ -1,3 +1,5 @@
+//! Renderer-neutral text shaping and glyph rasterization for GPUI platforms.
+
 use anyhow::{Context as _, Ok, Result};
 use collections::HashMap;
 use cosmic_text::{
@@ -14,7 +16,7 @@ use gpui::{
 use itertools::Itertools;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::{borrow::Cow, ops::Range, sync::Arc};
+use std::{borrow::Cow, ops::Range, path::Path, sync::Arc};
 use swash::{
     scale::{Render, ScaleContext, Source, StrikeWith},
     zeno::{Format, Vector},
@@ -63,16 +65,7 @@ struct LoadedFont {
 
 impl CosmicTextSystem {
     pub fn new(system_font_fallback: &str) -> Self {
-        let font_system = FontSystem::new();
-
-        Self(RwLock::new(CosmicTextSystemState {
-            font_system,
-            scratch: ShapeBuffer::default(),
-            swash_scale_context: ScaleContext::new(),
-            loaded_fonts: Vec::new(),
-            font_ids_by_family_cache: HashMap::default(),
-            system_font_fallback: system_font_fallback.to_string(),
-        }))
+        Self::from_font_system(system_font_fallback, FontSystem::new())
     }
 
     pub fn new_without_system_fonts(system_font_fallback: &str) -> Self {
@@ -80,7 +73,18 @@ impl CosmicTextSystem {
             "en-US".to_string(),
             cosmic_text::fontdb::Database::new(),
         );
+        Self::from_font_system(system_font_fallback, font_system)
+    }
 
+    /// Creates a text system whose system faces come from an explicit platform font directory.
+    pub fn new_with_font_dir(system_font_fallback: &str, font_dir: &Path) -> Self {
+        let mut database = cosmic_text::fontdb::Database::new();
+        database.load_fonts_dir(font_dir);
+        let font_system = FontSystem::new_with_locale_and_db("en-US".to_string(), database);
+        Self::from_font_system(system_font_fallback, font_system)
+    }
+
+    fn from_font_system(system_font_fallback: &str, font_system: FontSystem) -> Self {
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
             scratch: ShapeBuffer::default(),
@@ -989,8 +993,7 @@ fn face_info_into_properties(
 }
 
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
-    // TODO: Include other common emoji fonts
-    postscript_name == "NotoColorEmoji"
+    postscript_name == "NotoColorEmoji" || postscript_name.starts_with("HMOSColorEmoji")
 }
 
 #[cfg(test)]

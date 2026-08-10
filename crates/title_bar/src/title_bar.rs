@@ -1,4 +1,5 @@
 mod application_menu;
+#[cfg(not(target_env = "ohos"))]
 pub mod collab;
 mod onboarding_banner;
 mod plan_chip;
@@ -22,14 +23,17 @@ use crate::application_menu::{
 };
 
 use auto_update::AutoUpdateStatus;
+#[cfg(not(target_env = "ohos"))]
 use call::ActiveCall;
 use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
 
+#[cfg(not(target_env = "ohos"))]
+use gpui::TaskExt;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity, Focusable,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Subscription, TaskExt, WeakEntity, Window, actions, div,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
     pulsating_between,
 };
 use onboarding_banner::OnboardingBanner;
@@ -45,9 +49,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
+#[cfg(not(target_env = "ohos"))]
+use ui::PopoverMenuHandle;
 use ui::{
     Avatar, ButtonLike, ContextMenu, ContextMenuEntry, IconWithIndicator, Indicator, PopoverMenu,
-    PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
@@ -205,7 +211,9 @@ pub struct TitleBar {
     _subscriptions: Vec<Subscription>,
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
+    #[cfg(not(target_env = "ohos"))]
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
+    #[cfg(not(target_env = "ohos"))]
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
@@ -259,7 +267,17 @@ impl Render for TitleBar {
                             .flatten()
                     });
 
-                let identity = repo_identity_path(&repo.common_dir_abs_path);
+                // A normal checkout has its common directory at `<worktree>/.git`,
+                // while submodules and `--separate-git-dir` repositories keep it
+                // elsewhere. In those latter non-linked cases the worktree is the
+                // user-facing repository identity, not the metadata directory.
+                let identity = if !repo.is_linked_worktree()
+                    && repo.dot_git_abs_path != repo.common_dir_abs_path
+                {
+                    repo.work_directory_abs_path.as_ref()
+                } else {
+                    repo_identity_path(&repo.common_dir_abs_path)
+                };
 
                 let display_name = if identity.extension() == Some(std::ffi::OsStr::new("git")) {
                     identity.file_stem()
@@ -334,6 +352,7 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
+        #[cfg(not(target_env = "ohos"))]
         children.push(self.render_collaborator_list(window, cx).into_any_element());
 
         if title_bar_settings.show_onboarding_banner {
@@ -358,12 +377,15 @@ impl Render for TitleBar {
                 client::Status::SignedOut | client::Status::AuthenticationError
             );
 
+        let title_bar_controls = h_flex()
+            .pr_1()
+            .gap_1()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        #[cfg(not(target_env = "ohos"))]
+        let title_bar_controls = title_bar_controls.child(self.render_call_controls(window, cx));
+
         children.push(
-            h_flex()
-                .pr_1()
-                .gap_1()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(self.render_call_controls(window, cx))
+            title_bar_controls
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
                 .when(
@@ -442,6 +464,7 @@ impl TitleBar {
         let git_store = project.read(cx).git_store().clone();
         let user_store = workspace.app_state().user_store.clone();
         let client = workspace.app_state().client.clone();
+        #[cfg(not(target_env = "ohos"))]
         let active_call = ActiveCall::global(cx);
 
         let platform_style = PlatformStyle::platform();
@@ -465,6 +488,7 @@ impl TitleBar {
             }),
         );
 
+        #[cfg(not(target_env = "ohos"))]
         subscriptions.push(cx.observe(&active_call, |this, _, cx| this.active_call_changed(cx)));
         subscriptions.push(
             cx.subscribe(&git_store, move |_, _, event, cx| match event {
@@ -504,7 +528,7 @@ impl TitleBar {
 
         let banner = None;
 
-        let mut this = Self {
+        let this = Self {
             platform_titlebar,
             application_menu,
             workspace: workspace.weak_handle(),
@@ -515,13 +539,22 @@ impl TitleBar {
             _subscriptions: subscriptions,
             banner,
             update_version,
+            #[cfg(not(target_env = "ohos"))]
             screen_share_popover_handle: PopoverMenuHandle::default(),
+            #[cfg(not(target_env = "ohos"))]
             _diagnostics_subscription: None,
         };
 
-        this.observe_diagnostics(cx);
-
-        this
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let mut this = this;
+            this.observe_diagnostics(cx);
+            this
+        }
+        #[cfg(target_env = "ohos")]
+        {
+            this
+        }
     }
 
     fn worktree_count(&self, cx: &App) -> usize {
@@ -1096,11 +1129,13 @@ impl TitleBar {
         )
     }
 
+    #[cfg(not(target_env = "ohos"))]
     fn active_call_changed(&mut self, cx: &mut Context<Self>) {
         self.observe_diagnostics(cx);
         cx.notify();
     }
 
+    #[cfg(not(target_env = "ohos"))]
     fn observe_diagnostics(&mut self, cx: &mut Context<Self>) {
         let diagnostics = ActiveCall::global(cx)
             .read(cx)
@@ -1114,6 +1149,7 @@ impl TitleBar {
         }
     }
 
+    #[cfg(not(target_env = "ohos"))]
     fn share_project(&mut self, cx: &mut Context<Self>) {
         let active_call = ActiveCall::global(cx);
         let project = self.project.clone();
@@ -1122,6 +1158,7 @@ impl TitleBar {
             .detach_and_log_err(cx);
     }
 
+    #[cfg(not(target_env = "ohos"))]
     fn unshare_project(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let active_call = ActiveCall::global(cx);
         let project = self.project.clone();

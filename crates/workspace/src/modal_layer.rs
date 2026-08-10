@@ -169,6 +169,20 @@ impl ModalLayer {
         cx.emit(ModalOpenedEvent);
     }
 
+    pub(crate) fn show_modal_entity<V: ModalView>(
+        &mut self,
+        modal: Entity<V>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_stash_when_free = false;
+        if self.active_modal.is_some() && !self.hide_modal(window, cx) {
+            return;
+        }
+        self.show_modal(Box::new(modal), window, cx);
+        cx.emit(ModalOpenedEvent);
+    }
+
     /// Shows a modal and sets up subscriptions for dismiss events and focus tracking.
     /// The modal is automatically focused after being shown.
     fn show_modal(

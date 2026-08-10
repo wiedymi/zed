@@ -3831,9 +3831,53 @@ impl GitBinary {
         if let Some(index_file_path) = self.index_file_path.as_ref() {
             command.env("GIT_INDEX_FILE", index_file_path);
         }
+        #[cfg(target_env = "ohos")]
+        {
+            command.env(
+                "ZED_OHOS_GIT_METADATA_ROOT",
+                ::paths::data_dir().join("git"),
+            );
+        }
+        #[cfg(target_env = "ohos")]
+        if let Some(tools_root) = ohos_git_tools_root(&self.git_binary_path) {
+            command.env("GIT_EXEC_PATH", tools_root.join("libexec").join("git-core"));
+            command.env(
+                "GIT_TEMPLATE_DIR",
+                tools_root.join("share").join("git-core").join("templates"),
+            );
+            command.env(
+                "GIT_SSL_CAINFO",
+                tools_root
+                    .join("share")
+                    .join("certs")
+                    .join("ca-certificates.crt"),
+            );
+        }
         command.envs(&self.envs);
         command
     }
+}
+
+#[cfg(target_env = "ohos")]
+fn ohos_git_tools_root(git_binary_path: &Path) -> Option<PathBuf> {
+    let canonical_path = match std::fs::canonicalize(git_binary_path) {
+        Ok(path) => path,
+        Err(error) => {
+            log::error!(
+                "failed to resolve HarmonyOS Git executable {}: {error:#}",
+                git_binary_path.display()
+            );
+            return None;
+        }
+    };
+    let Some(root) = canonical_path.parent().and_then(Path::parent) else {
+        log::error!(
+            "HarmonyOS Git executable has no package root: {}",
+            canonical_path.display()
+        );
+        return None;
+    };
+    Some(root.to_path_buf())
 }
 
 #[derive(Error, Debug)]
