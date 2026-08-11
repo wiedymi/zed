@@ -1,11 +1,16 @@
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+#[cfg(any(test, not(target_env = "ohos")))]
+use anyhow::Context as _;
+use anyhow::Result;
 use collections::HashMap;
+#[cfg(any(test, not(target_env = "ohos")))]
 use serde::Deserialize;
 
+#[cfg(any(test, not(target_env = "ohos")))]
 use crate::shell::ShellKind;
 
+#[cfg(any(test, not(target_env = "ohos")))]
 fn parse_env_map_from_noisy_output(output: &str) -> Result<collections::HashMap<String, String>> {
     for (position, _) in output.match_indices('{') {
         let candidate = &output[position..];
@@ -32,9 +37,14 @@ pub async fn capture(
     args: &[String],
     directory: impl AsRef<Path>,
 ) -> Result<collections::HashMap<String, String>> {
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = (shell_path, args, directory);
+        return Ok(std::env::vars().collect());
+    }
     #[cfg(windows)]
     return capture_windows(shell_path.as_ref(), args, directory.as_ref()).await;
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_env = "ohos")))]
     return capture_unix(shell_path.as_ref(), args, directory.as_ref()).await;
 }
 
@@ -43,6 +53,7 @@ pub async fn capture(
 /// integrations that call posix_spawnp outside a real PTY), causing a
 /// non-zero exit status even though `zed --printenv` ran successfully and
 /// produced valid output on its separate fd.
+#[cfg(any(test, not(target_env = "ohos")))]
 fn parse_env_output(
     env_output: &str,
     status: &std::process::ExitStatus,
@@ -71,7 +82,7 @@ fn parse_env_output(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 async fn capture_unix(
     shell_path: &Path,
     args: &[String],
@@ -177,7 +188,7 @@ async fn capture_unix(
     )
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 async fn spawn_and_read_fd(
     mut command: std::process::Command,
     child_fd: std::os::fd::RawFd,

@@ -601,18 +601,12 @@ struct Index {
             answers: Array<string>,
             answerKinds: Array<number>
           ) => {
-            const orderedIndices = answers.map((_answer: string, index: number): number => index);
-            orderedIndices.sort((left: number, right: number): number => {
-              const leftRank = answerKinds[left] === 1 ? 0 : 1;
-              const rightRank = answerKinds[right] === 1 ? 0 : 1;
-              return leftRank - rightRank;
-            });
-            const buttons: Array<AlertDialogButtonOptions> = orderedIndices.map(
-              (answerIndex: number): AlertDialogButtonOptions => ({
+            const defaultAnswer = Math.max(answerKinds.indexOf(1), 0);
+            const buttons: Array<AlertDialogButtonOptions> = answers.map(
+              (_answer: string, answerIndex: number): AlertDialogButtonOptions => ({
                 value: answers[answerIndex],
-                defaultFocus: answerIndex === 0,
-                primary: answerIndex === 0,
-                style: answerIndex === 0 ? DialogButtonStyle.HIGHLIGHT : DialogButtonStyle.DEFAULT,
+                defaultFocus: answerIndex === defaultAnswer,
+                primary: answerIndex === defaultAnswer,
                 action: () => zedContext.completePrompt(requestId, answerIndex)
               })
             );
@@ -629,8 +623,7 @@ struct Index {
                 title: detail ? message : undefined,
                 message: detail ?? message,
                 autoCancel: false,
-                buttons: buttons,
-                buttonDirection: DialogButtonDirection.HORIZONTAL
+                buttons: buttons
               });
             } catch (error) {
               zedContext.completePrompt(requestId, undefined, `Unable to open dialog: ${JSON.stringify(error)}`);

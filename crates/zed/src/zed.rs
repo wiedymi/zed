@@ -818,7 +818,6 @@ fn initialize_panels(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
-    let _ = product_platform;
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
@@ -871,11 +870,7 @@ fn initialize_panels(
             ),
             add_panel_when_ready("Git", git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready("Debug", debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel_with_reporting(
-                workspace_handle.clone(),
-                cx.clone(),
-                product_platform == ProductPlatform::Ohos,
-            ),
+            initialize_agent_panel_with_reporting(workspace_handle.clone(), cx.clone()),
         );
 
         #[cfg(feature = "collaboration")]
@@ -887,10 +882,21 @@ fn initialize_panels(
             add_panel_when_ready(
                 "Collaboration",
                 channels_panel,
-                workspace_handle,
+                workspace_handle.clone(),
                 cx.clone(),
             )
             .await;
+        }
+
+        if product_platform == ProductPlatform::Ohos {
+            workspace_handle.update_in(&mut cx.clone(), |workspace, window, cx| {
+                if workspace.panel::<agent_ui::AgentPanel>(cx).is_some() {
+                    workspace.reveal_panel::<agent_ui::AgentPanel>(window, cx);
+                    log::info!("opened the HarmonyOS Agent panel after restoring all panels");
+                } else if !DisableAiSettings::get_global(cx).disable_ai {
+                    log::error!("the HarmonyOS Agent panel was not registered after loading");
+                }
+            })?;
         }
 
         anyhow::Ok(())
@@ -900,11 +906,8 @@ fn initialize_panels(
 async fn initialize_agent_panel_with_reporting(
     workspace_handle: WeakEntity<Workspace>,
     mut cx: AsyncWindowContext,
-    open_on_load: bool,
 ) {
-    if let Err(error) =
-        initialize_agent_panel(workspace_handle.clone(), cx.clone(), open_on_load).await
-    {
+    if let Err(error) = initialize_agent_panel(workspace_handle.clone(), cx.clone()).await {
         report_panel_load_error("Agent", &error, workspace_handle, &mut cx);
     }
 }
@@ -987,7 +990,6 @@ fn ensure_agent_panel_for_workspace(
 async fn initialize_agent_panel(
     workspace_handle: WeakEntity<Workspace>,
     mut cx: AsyncWindowContext,
-    open_on_load: bool,
 ) -> anyhow::Result<()> {
     workspace_handle.update_in(&mut cx, |workspace, _window, _cx| {
         // Register actions before the asynchronous panel restore. This keeps
@@ -1007,12 +1009,6 @@ async fn initialize_agent_panel(
             ensure_agent_panel_for_workspace(workspace, None, window, cx)
         })?
         .await?;
-
-    if open_on_load {
-        workspace_handle.update_in(&mut cx, |workspace, window, cx| {
-            workspace.open_panel::<agent_ui::AgentPanel>(window, cx);
-        })?;
-    }
 
     workspace_handle.update_in(&mut cx, |_workspace, window, cx| {
         cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {

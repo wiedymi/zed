@@ -20,6 +20,30 @@ index 517fa7a..f60ed56 100644
 @@ -3225 +3226 @@ get_homedir(void)
 -	if ((pw = getpwuid(getuid())) != NULL && *pw->pw_dir != '\0')
 +	if ((pw = ohos_getpwuid(getuid())) != NULL && *pw->pw_dir != '\0')
+diff --git a/mux.c b/mux.c
+index 23f0032..098fc36 100644
+--- a/mux.c
++++ b/mux.c
+@@ -1375,0 +1376,10 @@ muxserver_listen(struct ssh *ssh)
++#ifdef __OHOS__
++	/* HarmonyOS application sandboxes reject hard links. The temporary
++	 * control path is private to this process, so rename it into place. */
++	if (access(orig_control_path, F_OK) == 0) {
++		errno = EEXIST;
++		goto mux_path_error;
++	}
++	if (rename(options.control_path, orig_control_path) != 0) {
++ mux_path_error:
++#else
+@@ -1376,0 +1387 @@ muxserver_listen(struct ssh *ssh)
++#endif
+@@ -1378 +1389 @@ muxserver_listen(struct ssh *ssh)
+-			fatal_f("link mux listener %s => %s: %s",
++			fatal_f("move mux listener %s => %s: %s",
+@@ -1386,0 +1398 @@ muxserver_listen(struct ssh *ssh)
++#ifndef __OHOS__
+@@ -1387,0 +1400 @@ muxserver_listen(struct ssh *ssh)
++#endif
 diff --git a/ohos-pwd.c b/ohos-pwd.c
 new file mode 100644
 index 0000000..ef9b242

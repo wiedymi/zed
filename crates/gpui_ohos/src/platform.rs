@@ -1076,15 +1076,17 @@ impl OhosPlatform {
             NativeEvent::Hover(hovered) => update_hover(window, hovered),
             NativeEvent::Focused(active) => {
                 if active {
-                    let windows = self.windows.borrow().clone();
-                    for other in windows {
-                        if !Rc::ptr_eq(&other, window) {
-                            update_active(&other, false);
-                        }
-                    }
+                    self.activate_window(window);
+                } else {
+                    update_active(window, false);
                 }
-                update_active(window, active);
             }
+        }
+    }
+
+    fn activate_window(&self, window: &Rc<RefCell<WindowState>>) {
+        for candidate in self.windows.borrow().clone() {
+            update_active(&candidate, Rc::ptr_eq(&candidate, window));
         }
     }
 
@@ -1221,10 +1223,11 @@ impl OhosPlatform {
             bail!("the primary HarmonyOS window cannot be attached as an auxiliary window");
         }
         let component = xcomponent_by_id(&format!("zed-auxiliary-surface-{window_id}"))?;
-        if window.borrow().component == Some(component) {
-            return Ok(());
+        if window.borrow().component != Some(component) {
+            self.install_window_component(&window, component)?;
         }
-        self.install_window_component(&window, component)
+        self.activate_window(&window);
+        Ok(())
     }
 
     fn close_auxiliary_window(&self, window_id: u32) {
@@ -2554,7 +2557,6 @@ fn dispatch_text(window: &Rc<RefCell<WindowState>>, text: &str) {
     let mut input_handler = window.borrow_mut().input_handler.take();
     if let Some(handler) = input_handler.as_mut() {
         if handler.query_accepts_text_input() {
-            log_message(LogLevel::Info, format!("committing text input {text:?}"));
             handler.replace_text_in_range(None, text);
         } else {
             log_message(LogLevel::Warning, "focused handler rejected text input");
