@@ -28,6 +28,7 @@ let windowStateHandler: ((
   maximized: boolean,
   fullscreen: boolean
 ) => void) | undefined;
+let windowActivationHandler: ((windowId: number, active: boolean) => void) | undefined;
 
 class AuxiliaryPageStorage {
   windowId: number;
@@ -84,6 +85,24 @@ function publishWindowState(windowId: number, targetWindow: window.Window): void
   }
 }
 
+function publishWindowActivation(windowId: number, active: boolean): void {
+  const handler = windowActivationHandler;
+  if (!handler) {
+    return;
+  }
+  try {
+    handler(windowId, active);
+  } catch (error) {
+    hilog.error(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Failed to publish activation for window %{public}d: %{public}s',
+      windowId,
+      JSON.stringify(error)
+    );
+  }
+}
+
 function observeWindow(windowId: number, targetWindow: window.Window): void {
   if (observedWindowIds.has(windowId)) {
     publishWindowState(windowId, targetWindow);
@@ -95,6 +114,18 @@ function observeWindow(windowId: number, targetWindow: window.Window): void {
     });
     targetWindow.on('windowStatusChange', (): void => {
       publishWindowState(windowId, targetWindow);
+    });
+    targetWindow.on('windowEvent', (event: window.WindowEventType): void => {
+      if (event === window.WindowEventType.WINDOW_ACTIVE) {
+        publishWindowActivation(windowId, true);
+      } else if (event === window.WindowEventType.WINDOW_INACTIVE) {
+        publishWindowActivation(windowId, false);
+      } else if (event === window.WindowEventType.WINDOW_DESTROYED && windowId !== 0) {
+        requestAuxiliaryClose(windowId);
+        auxiliaryWindows.delete(windowId);
+        auxiliaryCloseHandlers.delete(windowId);
+        observedWindowIds.delete(windowId);
+      }
     });
     observedWindowIds.add(windowId);
     publishWindowState(windowId, targetWindow);
@@ -116,6 +147,7 @@ function stopObservingWindow(windowId: number, targetWindow: window.Window): voi
   try {
     targetWindow.off('windowRectChange');
     targetWindow.off('windowStatusChange');
+    targetWindow.off('windowEvent');
   } catch (error) {
     hilog.error(
       LOG_DOMAIN,
@@ -127,31 +159,35 @@ function stopObservingWindow(windowId: number, targetWindow: window.Window): voi
   }
 }
 
+function requestAuxiliaryClose(windowId: number): void {
+  const handler = auxiliaryCloseHandlers.get(windowId);
+  if (!handler) {
+    hilog.warn(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Ignored a close request while auxiliary window %{public}d was not ready',
+      windowId
+    );
+    return;
+  }
+  hilog.info(LOG_DOMAIN, LOG_TAG, 'Sending close request for auxiliary window %{public}d to GPUI', windowId);
+  try {
+    handler();
+  } catch (error) {
+    hilog.error(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Failed to request GPUI close for auxiliary window %{public}d: %{public}s',
+      windowId,
+      JSON.stringify(error)
+    );
+  }
+}
+
 function observeAuxiliaryClose(windowId: number, targetWindow: window.Window): void {
   try {
     targetWindow.on('windowWillClose', (): Promise<boolean> => {
-      const handler = auxiliaryCloseHandlers.get(windowId);
-      if (!handler) {
-        hilog.warn(
-          LOG_DOMAIN,
-          LOG_TAG,
-          'Ignored a close request while auxiliary window %{public}d was not ready',
-          windowId
-        );
-        return Promise.resolve(true);
-      }
-      hilog.info(LOG_DOMAIN, LOG_TAG, 'Sending close request for auxiliary window %{public}d to GPUI', windowId);
-      try {
-        handler();
-      } catch (error) {
-        hilog.error(
-          LOG_DOMAIN,
-          LOG_TAG,
-          'Failed to request GPUI close for auxiliary window %{public}d: %{public}s',
-          windowId,
-          JSON.stringify(error)
-        );
-      }
+      requestAuxiliaryClose(windowId);
       return Promise.resolve(true);
     });
   } catch (error) {
@@ -204,6 +240,12 @@ export function setWindowStateHandler(handler: ((
   auxiliaryWindows.forEach((targetWindow: window.Window, windowId: number): void => {
     observeWindow(windowId, targetWindow);
   });
+}
+
+export function setWindowActivationHandler(
+  handler: ((windowId: number, active: boolean) => void) | undefined
+): void {
+  windowActivationHandler = handler;
 }
 
 async function createAuxiliaryWindow(

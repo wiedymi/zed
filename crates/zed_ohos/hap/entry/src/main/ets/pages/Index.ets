@@ -19,7 +19,11 @@ import { fileUri, picker } from '@kit.CoreFileKit';
 import { pointer } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
-import { controlWindow, setWindowStateHandler } from '../entryability/AuxiliaryWindow';
+import {
+  controlWindow,
+  setWindowActivationHandler,
+  setWindowStateHandler
+} from '../entryability/AuxiliaryWindow';
 import { setNotificationResponseHandler, setOpenUrlsHandler } from '../entryability/NativeBridge';
 import { dispatchFileDrag, FileDropNativeContext, fileDropTypes } from '../entryability/FileDrop';
 
@@ -31,6 +35,12 @@ enum ApplicationCommand {
   ACTIVATE = 0,
   BACKGROUND = 1,
   RESTART = 2
+}
+
+enum PromptButtonKind {
+  OK = 0,
+  CANCEL = 1,
+  OTHER = 2
 }
 
 interface ZedNativeContext extends FileDropNativeContext {
@@ -103,6 +113,7 @@ interface ZedNativeContext extends FileDropNativeContext {
     maximized: boolean,
     fullscreen: boolean
   ): void;
+  updateWindowActivation(windowId: number, active: boolean): void;
   completePathPrompt(requestId: number, paths: Array<string>, error?: string): void;
   completePrompt(requestId: number, answer?: number, error?: string): void;
   handleSystemNotificationResponse(tag: string, actionId?: string): void;
@@ -381,6 +392,7 @@ struct Index {
     this.unregisterAccessibility = undefined;
     setNotificationResponseHandler(undefined);
     setOpenUrlsHandler(undefined);
+    setWindowActivationHandler(undefined);
     setWindowStateHandler(undefined);
     this.nativeContext?.setLifecyclePhase(2);
   }
@@ -601,15 +613,22 @@ struct Index {
             answers: Array<string>,
             answerKinds: Array<number>
           ) => {
-            const defaultAnswer = Math.max(answerKinds.indexOf(1), 0);
-            const buttons: Array<AlertDialogButtonOptions> = answers.map(
-              (_answer: string, answerIndex: number): AlertDialogButtonOptions => ({
-                value: answers[answerIndex],
-                defaultFocus: answerIndex === defaultAnswer,
-                primary: answerIndex === defaultAnswer,
-                action: () => zedContext.completePrompt(requestId, answerIndex)
-              })
-            );
+            const defaultAnswer = Math.max(answerKinds.indexOf(PromptButtonKind.CANCEL), 0);
+            const button = (answerIndex: number): AlertDialogButtonOptions => ({
+              value: answers[answerIndex],
+              defaultFocus: answerIndex === defaultAnswer,
+              primary: answerIndex === defaultAnswer,
+              action: (): void => {
+                hilog.info(
+                  LOG_DOMAIN,
+                  LOG_TAG,
+                  'Completing GPUI prompt %{public}d with answer %{public}d',
+                  requestId,
+                  answerIndex
+                );
+                zedContext.completePrompt(requestId, answerIndex);
+              }
+            });
             try {
               hilog.info(
                 LOG_DOMAIN,
@@ -619,12 +638,25 @@ struct Index {
                 level,
                 answers.length
               );
-              uiContext.showAlertDialog({
-                title: detail ? message : undefined,
-                message: detail ?? message,
-                autoCancel: false,
-                buttons: buttons
-              });
+              if (answers.length === 2) {
+                uiContext.showAlertDialog({
+                  title: detail ? message : undefined,
+                  message: detail ?? message,
+                  autoCancel: false,
+                  primaryButton: button(0),
+                  secondaryButton: button(1)
+                });
+              } else {
+                const buttons: Array<AlertDialogButtonOptions> = answers.map(
+                  (_answer: string, answerIndex: number): AlertDialogButtonOptions => button(answerIndex)
+                );
+                uiContext.showAlertDialog({
+                  title: detail ? message : undefined,
+                  message: detail ?? message,
+                  autoCancel: false,
+                  buttons: buttons
+                });
+              }
             } catch (error) {
               zedContext.completePrompt(requestId, undefined, `Unable to open dialog: ${JSON.stringify(error)}`);
             }
@@ -643,6 +675,9 @@ struct Index {
               maximized,
               fullscreen
             );
+          });
+          setWindowActivationHandler((windowId: number, active: boolean): void => {
+            zedContext.updateWindowActivation(windowId, active);
           });
           setNotificationResponseHandler((tag: string, actionId?: string): void => {
             zedContext.handleSystemNotificationResponse(tag, actionId);

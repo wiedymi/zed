@@ -69,6 +69,7 @@ export const updateWindowState: (
   maximized: boolean,
   fullscreen: boolean
 ) => void;
+export const updateWindowActivation: (windowId: number, active: boolean) => void;
 export const handleSystemNotificationResponse: (tag: string, actionId?: string) => void;
 export const setLifecyclePhase: (phase: number) => void;
 export const handleMemoryWarning: () => void;

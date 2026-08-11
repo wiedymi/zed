@@ -310,6 +310,15 @@ pub fn update_arkui_window_state(
     })
 }
 
+pub fn update_arkui_window_activation(window_id: u32, active: bool) -> Result<()> {
+    CURRENT_PLATFORM.with_borrow(|current| {
+        current
+            .as_ref()
+            .context("ArkUI window activation arrived before GPUI initialized")?
+            .update_arkui_window_activation(window_id, active)
+    })
+}
+
 pub fn handle_system_notification_response(tag: String, action_id: Option<String>) {
     CURRENT_PLATFORM.with_borrow(|current| {
         let Some(platform) = current.as_ref() else {
@@ -1303,6 +1312,26 @@ impl OhosPlatform {
         }
         if let Some(callback) = moved {
             window.borrow_mut().callbacks.moved = Some(callback);
+        }
+        Ok(())
+    }
+
+    fn update_arkui_window_activation(&self, window_id: u32, active: bool) -> Result<()> {
+        let window = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|window| window.borrow().native_window_id == window_id)
+            .cloned()
+            .with_context(|| format!("activation targeted unknown HarmonyOS window {window_id}"))?;
+        if window.borrow().active == active {
+            return Ok(());
+        }
+        if active {
+            self.activate_window(&window);
+            self.request_frame();
+        } else {
+            update_active(&window, false);
         }
         Ok(())
     }

@@ -509,6 +509,20 @@ pub fn update_window_state(
 }
 
 #[napi]
+pub fn update_window_activation(window_id: u32, active: bool) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::update_arkui_window_activation(window_id, active)
+    }))
+    .map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while updating window activation: {}",
+            panic_message(panic.as_ref())
+        ))
+    })?
+    .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
 pub fn handle_system_notification_response(
     tag: String,
     action_id: Option<String>,

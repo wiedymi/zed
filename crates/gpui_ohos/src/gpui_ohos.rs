@@ -23,7 +23,7 @@ pub use platform::{
     dispatch_arkui_key_event, handle_memory_warning, handle_open_urls,
     handle_system_notification_response, on_arkui_frame, persistent_uri_for_path,
     set_accessibility_enabled, set_lifecycle_phase, set_scale_factor, set_system_appearance,
-    set_thermal_level, update_arkui_window_state,
+    set_thermal_level, update_arkui_window_activation, update_arkui_window_state,
 };
 pub use xcomponent::{
     NativeEvent, NativeMouseEvent, NativeScrollEvent, NativeSurfaceEvent, NativeTouchEvent,
