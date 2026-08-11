@@ -1,3 +1,5 @@
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::{
     any::Any,
     cell::RefCell,
@@ -212,7 +214,7 @@ pub unsafe fn register_xcomponent(component: *mut c_void) -> Result<()> {
     Ok(())
 }
 
-fn xcomponent_id(component: NonNull<OH_NativeXComponent>) -> Result<String> {
+pub(crate) fn xcomponent_id(component: NonNull<OH_NativeXComponent>) -> Result<String> {
     const MAXIMUM_ID_LENGTH: usize = 128;
     let mut id = [0_u8; MAXIMUM_ID_LENGTH + 1];
     let mut length = u64::try_from(id.len()).context("XComponent ID buffer length exceeds u64")?;

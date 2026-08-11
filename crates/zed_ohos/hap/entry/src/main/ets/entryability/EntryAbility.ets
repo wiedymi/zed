@@ -4,12 +4,13 @@ import {
   Permissions,
   UIAbility,
   Want,
-  abilityAccessCtrl
+  abilityAccessCtrl,
+  wantConstant
 } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { configureWindowStage } from './AuxiliaryWindow';
-import { deliverNotificationResponse } from './NativeBridge';
+import { deliverNotificationResponse, deliverOpenUrls } from './NativeBridge';
 
 const LOG_DOMAIN = 0xD002;
 const LOG_TAG = 'ZedOHOS';
@@ -23,6 +24,25 @@ export default class EntryAbility extends UIAbility {
     }
     const action = want.parameters?.['zed.notification.action'];
     deliverNotificationResponse(tag, typeof action === 'string' && action.length > 0 ? action : undefined);
+  }
+
+  private handleIncomingWant(want: Want): void {
+    this.handleNotificationWant(want);
+    const urls: Array<string> = [];
+    if (typeof want.uri === 'string' && want.uri.length > 0) {
+      urls.push(want.uri);
+    }
+    const stream = want.parameters?.[wantConstant.Params.PARAMS_STREAM];
+    if (typeof stream === 'string' && stream.length > 0 && !urls.includes(stream)) {
+      urls.push(stream);
+    } else if (Array.isArray(stream)) {
+      for (const value of stream as Array<string>) {
+        if (typeof value === 'string' && value.length > 0 && !urls.includes(value)) {
+          urls.push(value);
+        }
+      }
+    }
+    deliverOpenUrls(urls);
   }
 
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
@@ -49,11 +69,11 @@ export default class EntryAbility extends UIAbility {
         hilog.error(LOG_DOMAIN, LOG_TAG, 'Failed to request pasteboard permission: %{public}s', JSON.stringify(error));
       });
     hilog.info(LOG_DOMAIN, LOG_TAG, 'Zed ability created');
-    this.handleNotificationWant(want);
+    this.handleIncomingWant(want);
   }
 
   onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
-    this.handleNotificationWant(want);
+    this.handleIncomingWant(want);
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {

@@ -1,8 +1,10 @@
 #![cfg(target_env = "ohos")]
+#![allow(clippy::missing_const_for_thread_local)]
+
+mod crash_reporting;
 
 use std::{
     any::Any,
-    borrow::Cow,
     cell::RefCell,
     ffi::c_void,
     fs as std_fs,
@@ -13,7 +15,6 @@ use std::{
     sync::{Arc, Once},
 };
 
-use agent_ui::AgentPanel;
 use anyhow::{Context as _, Result, anyhow};
 use assets::Assets;
 use client::{Client, user::UserStore};
@@ -21,13 +22,11 @@ use clock::RealSystemClock;
 use db::{AppDatabase, kvp::KeyValueStore};
 use editor::Editor;
 use fs::{Fs, RealFs};
-use futures::{Future, StreamExt as _};
+use futures::StreamExt as _;
 use git::GitHostingProviderRegistry;
-use git_ui::git_panel::GitPanel;
 use gpui::{
-    App, AppContext as _, Application, ApplicationHandle, AsyncWindowContext, Context, Entity,
-    Focusable as _, Menu, MenuItem, OsAction, PathPromptOptions, Subscription, TaskExt as _,
-    UpdateGlobal as _, WeakEntity, WindowOptions,
+    App, AppContext as _, Application, ApplicationHandle, Context, Entity, Focusable as _,
+    Subscription, TaskExt as _, UpdateGlobal as _, WindowOptions,
 };
 use http_client::HttpClientWithUrl;
 use language::{Buffer, BufferEvent, LanguageRegistry};
@@ -38,25 +37,23 @@ use napi_ohos::{
     threadsafe_function::ThreadsafeFunctionPriority,
 };
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
-use outline_panel::OutlinePanel;
 use project::{Project, ProjectPath, buffer_store::BufferStore};
-use project_panel::ProjectPanel;
 use prompt_store::PromptBuilder;
 use release_channel::AppVersion;
 use reqwest_client::ReqwestClient;
 use session::{AppSession, Session};
-use terminal_view::terminal_panel::TerminalPanel;
 use theme::ActiveTheme as _;
 use util::rel_path::RelPath;
 use uuid::Uuid;
 use workspace::{AppState, MultiWorkspace, OpenMode, Workspace, WorkspaceStore};
 
-gpui::actions!(zed_ohos, [OpenFolder]);
-
+// The N-API module export macro calls this path from generated native code.
+#[allow(dead_code)]
 const NATIVE_XCOMPONENT_OBJECT: &str = "__NATIVE_XCOMPONENT_OBJ__";
 const SANDBOX_DOCUMENT_NAME: &str = "welcome.md";
 const LAST_WORKSPACE_URI_KEY: &str = "ohos.last_workspace_uri";
 const INITIAL_DOCUMENT: &str = "# Zed on HarmonyOS\n\nThis is a real Zed buffer stored in the app sandbox.\n\nEdit this text, close Zed, and reopen it: your changes are saved automatically.\n";
+#[allow(dead_code)]
 static INSTALL_PANIC_HOOK: Once = Once::new();
 
 thread_local! {
@@ -159,6 +156,7 @@ pub fn initialize_frame_scheduler(
     request_frame: Function<'_, (), ()>,
     open_external_url: Function<'_, String, ()>,
     open_external_path: Function<'_, (String, bool), ()>,
+    start_outbound_drag: Function<'_, (u32, Vec<String>, Vec<bool>), ()>,
     set_cursor: Function<'_, (u32, bool), ()>,
     control_window: Function<'_, (u32, u32, String, i32, i32, u32, u32), ()>,
     control_application: Function<'_, u32, ()>,
@@ -236,6 +234,23 @@ pub fn initialize_frame_scheduler(
             Err(anyhow!("N-API external-path callback returned {status}"))
         }
     });
+    let start_outbound_drag = start_outbound_drag
+        .build_threadsafe_function::<(u32, Vec<String>, Vec<bool>)>()
+        .callee_handled::<false>()
+        .build_callback(|context| Ok(FnArgs::from(context.value)))?;
+    let start_outbound_drag = Arc::new(
+        move |window_id: u32, paths: Vec<String>, directories: Vec<bool>| {
+            let status = start_outbound_drag.call_with_priority(
+                (window_id, paths, directories),
+                ThreadsafeFunctionPriority::Immediate,
+            );
+            if status == Status::Ok {
+                Ok(())
+            } else {
+                Err(anyhow!("N-API outbound-drag callback returned {status}"))
+            }
+        },
+    );
     let set_cursor = set_cursor
         .build_threadsafe_function::<(u32, bool)>()
         .callee_handled::<false>()
@@ -400,6 +415,7 @@ pub fn initialize_frame_scheduler(
         schedule_frame,
         open_external_url,
         open_external_path,
+        start_outbound_drag,
         set_cursor,
         control_window,
         control_application,
@@ -494,6 +510,48 @@ pub fn set_scale_factor(scale_factor: f64) -> napi_ohos::Result<()> {
         ))
     })?
     .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
+pub fn set_system_appearance(color_mode: i32) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| {
+        gpui_ohos::set_system_appearance(color_mode)
+    }))
+    .map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while updating system appearance: {}",
+            panic_message(panic.as_ref())
+        ))
+    })?
+    .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
+pub fn set_thermal_level(level: u32) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| gpui_ohos::set_thermal_level(level)))
+        .map_err(|panic| {
+            napi_ohos::Error::from_reason(format!(
+                "Zed panicked while updating thermal state: {}",
+                panic_message(panic.as_ref())
+            ))
+        })?
+        .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
+pub fn set_accessibility_enabled(enabled: bool) -> napi_ohos::Result<()> {
+    gpui_ohos::set_accessibility_enabled(enabled)
+        .map_err(|error| napi_ohos::Error::from_reason(format!("{error:#}")))
+}
+
+#[napi]
+pub fn handle_open_urls(urls: Vec<String>) -> napi_ohos::Result<()> {
+    catch_unwind(AssertUnwindSafe(|| gpui_ohos::handle_open_urls(urls))).map_err(|panic| {
+        napi_ohos::Error::from_reason(format!(
+            "Zed panicked while handling incoming URLs: {}",
+            panic_message(panic.as_ref())
+        ))
+    })
 }
 
 #[napi]
@@ -603,6 +661,7 @@ pub fn on_frame() -> napi_ohos::Result<()> {
 }
 
 #[napi(module_exports)]
+#[allow(dead_code)]
 fn initialize_native_surface(env: Env, exports: Object) -> napi_ohos::Result<()> {
     install_panic_hook();
     let native_object = exports
@@ -628,6 +687,7 @@ fn initialize_native_surface(env: Env, exports: Object) -> napi_ohos::Result<()>
     Ok(())
 }
 
+#[allow(dead_code)]
 fn install_panic_hook() {
     INSTALL_PANIC_HOOK.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
@@ -720,10 +780,17 @@ fn start_zed(sandbox_paths: SandboxPaths) -> Result<()> {
         return Ok(());
     }
 
+    if let Err(error) = crash_reporting::install() {
+        gpui_ohos::log_message(
+            gpui_ohos::LogLevel::Error,
+            format!("HarmonyOS crash reporting is unavailable: {error:#}"),
+        );
+    }
+
     let launch_result = Rc::new(RefCell::new(None));
     let launch_result_for_callback = launch_result.clone();
 
-    let application = Application::new_inaccessible(gpui_ohos::current_platform(false))
+    let application = Application::with_platform(gpui_ohos::current_platform(false))
         .with_assets(Assets)
         .run_embedded(move |cx| {
             if let Err(error) = initialize_zed(cx, sandbox_paths) {
@@ -734,12 +801,103 @@ fn start_zed(sandbox_paths: SandboxPaths) -> Result<()> {
     if let Some(error) = launch_result.borrow_mut().take() {
         return Err(error);
     }
+    let async_app = application.to_async();
+    gpui_ohos::current_platform(false).on_open_urls(Box::new(move |urls| {
+        async_app.update(|cx| handle_incoming_urls(urls, cx));
+    }));
     APPLICATION.with_borrow_mut(|slot| *slot = Some(application));
     gpui_ohos::log_message(
         gpui_ohos::LogLevel::Info,
         "Zed runtime initialized on HarmonyOS",
     );
     Ok(())
+}
+
+fn handle_incoming_urls(urls: Vec<String>, cx: &mut App) {
+    let mut paths = Vec::new();
+    for url in urls {
+        if url == "zed://" || url == "zed://open" || url == "zed://open/" {
+            cx.activate(true);
+        } else if url == "zed://settings" || url == "zed://settings/" {
+            dispatch_to_active_window(Box::new(zed_actions::OpenSettings), cx);
+        } else if let Some(path) = url.strip_prefix("zed://settings/") {
+            dispatch_to_active_window(
+                Box::new(zed_actions::OpenSettingsAt {
+                    path: path.to_owned(),
+                    target: None,
+                }),
+                cx,
+            );
+        } else if let Some(extension_id) = url.strip_prefix("zed://extension/") {
+            dispatch_to_active_window(
+                Box::new(zed_actions::Extensions {
+                    category_filter: None,
+                    id: Some(extension_id.to_owned()),
+                }),
+                cx,
+            );
+        } else if url.starts_with("zed://agent") {
+            dispatch_to_active_window(Box::new(zed_actions::assistant::ToggleFocus), cx);
+        } else if url.starts_with("file:") || url.starts_with("datashare:") {
+            match gpui_ohos::resolve_incoming_uri(&url) {
+                Ok(path) => paths.push(path),
+                Err(error) => show_incoming_url_error(
+                    format!("HarmonyOS could not open {url}: {error:#}"),
+                    cx,
+                ),
+            }
+        } else {
+            show_incoming_url_error(format!("Zed cannot handle this HarmonyOS link: {url}"), cx);
+        }
+    }
+
+    if paths.is_empty() {
+        return;
+    }
+    let app_state = AppState::global(cx);
+    workspace::open_paths(&paths, app_state, workspace::OpenOptions::default(), cx)
+        .detach_and_log_err(cx);
+}
+
+fn dispatch_to_active_window(action: Box<dyn gpui::Action>, cx: &mut App) {
+    let Some(window) = cx
+        .active_window()
+        .and_then(|window| window.downcast::<MultiWorkspace>())
+    else {
+        show_incoming_url_error(
+            "HarmonyOS link arrived before a workspace opened".to_owned(),
+            cx,
+        );
+        return;
+    };
+    if let Err(error) = window.update(cx, |_, window, cx| {
+        window.dispatch_action(action, cx);
+    }) {
+        gpui_ohos::log_message(
+            gpui_ohos::LogLevel::Error,
+            format!("failed to dispatch a HarmonyOS link action: {error:#}"),
+        );
+    }
+}
+
+fn show_incoming_url_error(message: String, cx: &mut App) {
+    gpui_ohos::log_message(gpui_ohos::LogLevel::Error, message.clone());
+    let Some(window) = cx
+        .active_window()
+        .and_then(|window| window.downcast::<MultiWorkspace>())
+    else {
+        return;
+    };
+    if let Err(error) = window.update(cx, |multi_workspace, _, cx| {
+        multi_workspace
+            .workspace()
+            .update(cx, |workspace, cx| workspace.show_error(message, cx));
+    }) {
+        gpui_ohos::log_message(
+            gpui_ohos::LogLevel::Error,
+            format!("failed to show a HarmonyOS link error: {error:#}"),
+        );
+    }
 }
 
 fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
@@ -823,6 +981,7 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
     GitHostingProviderRegistry::set_global(Arc::new(GitHostingProviderRegistry::new()), cx);
     git_hosting_providers::init(cx);
     extension::init(cx);
+    debug_adapter_extension::init(extension::ExtensionHostProxy::global(cx), cx);
     let user_agent = format!(
         "Zed/{} (HarmonyOS; {})",
         env!("CARGO_PKG_VERSION"),
@@ -841,6 +1000,8 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
     Client::set_global(client.clone(), cx);
     client::init(&client, cx);
     Project::init(&client, cx);
+    debugger_ui::init(cx);
+    debugger_tools::init(cx);
     feature_flags::FeatureFlagStore::init(cx);
 
     let mut languages = LanguageRegistry::new(cx.background_executor().clone());
@@ -907,6 +1068,8 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                     session,
                 });
                 AppState::set_global(app_state.clone(), cx);
+                zed_product::init(false, cx);
+                dap_adapters::init(cx);
                 client::RefreshLlmTokenListener::register(
                     app_state.client.clone(),
                     app_state.user_store.clone(),
@@ -943,8 +1106,26 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                     theme::ThemeRegistry::global(cx),
                     cx.background_executor().clone(),
                 );
+                zed_product::eager_load_active_theme_and_icon_theme(app_state.fs.clone(), cx);
+                let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
+                    enterprise_uri: language::language_settings::all_language_settings(None, cx)
+                        .edit_predictions
+                        .copilot
+                        .enterprise_uri
+                        .clone(),
+                };
+                copilot_chat::init(
+                    app_state.client.http_client(),
+                    zed_credentials_provider::global(cx),
+                    copilot_chat_configuration,
+                    cx,
+                );
+                copilot_ui::init(&app_state, cx);
                 language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
                 acp_tools::init(cx);
+                zed_product::telemetry_log::init(cx);
+                zed_product::remote_debug::init(cx);
+                edit_prediction_ui::init(cx);
                 web_search::init(cx);
                 web_search_providers::init(
                     app_state.client.clone(),
@@ -965,11 +1146,23 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                     false,
                     cx,
                 );
+                zed_product::watch_user_agents_md(app_state.fs.clone(), cx);
+                zed_product::edit_prediction_registry::init(
+                    app_state.client.clone(),
+                    app_state.user_store.clone(),
+                    cx,
+                );
+                repl::init(app_state.fs.clone(), cx);
                 snippet_provider::init(cx);
                 image_viewer::init(cx);
+                repl::notebook::init(cx);
                 diagnostics::init(cx);
                 workspace::init(app_state.clone(), cx);
-                initialize_workspaces(cx);
+                zed_product::initialize_workspace(
+                    app_state.clone(),
+                    zed_product::ProductPlatform::Ohos,
+                    cx,
+                );
                 ui_prompt::init(cx);
                 go_to_line::init(cx);
                 file_finder::init(cx);
@@ -992,6 +1185,7 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                         search::buffer_search::register_pane_search_actions,
                 });
                 vim::init(cx);
+                journal::init(app_state.clone(), cx);
                 encoding_selector::init(cx);
                 language_selector::init(cx);
                 line_ending_selector::init(cx);
@@ -1011,6 +1205,7 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                 settings_ui::init(cx);
                 keymap_editor::init(cx);
                 extensions_ui::init(cx);
+                edit_prediction::init(cx);
                 which_key::init(cx);
                 title_bar::init(cx);
                 app_state.languages.set_theme(cx.theme().clone());
@@ -1019,9 +1214,8 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                     move |cx| languages.set_theme(cx.theme().clone())
                 })
                 .detach();
-                cx.set_menus(ohos_app_menus());
-                cx.on_action(|_: &OpenFolder, cx| open_folder(cx));
-                cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
+                let menus = zed_product::app_menus(cx);
+                cx.set_menus(menus);
                 app_state
             });
 
@@ -1247,7 +1441,8 @@ fn reload_keymaps(mut user_bindings: Vec<gpui::KeyBinding>, cx: &mut App) -> Res
         binding.set_meta(KeybindSource::User.meta());
     }
     cx.bind_keys(user_bindings);
-    cx.set_menus(ohos_app_menus());
+    let menus = zed_product::app_menus(cx);
+    cx.set_menus(menus);
     keymap_editor::KeymapEventChannel::trigger_keymap_changed(cx);
     Ok(())
 }
@@ -1266,444 +1461,6 @@ fn load_builtin_keymap(
         binding.set_meta(source.meta());
     }
     Ok(bindings)
-}
-
-fn initialize_workspaces(cx: &mut App) {
-    cx.observe_new(
-        |workspace: &mut Workspace, window, cx: &mut Context<Workspace>| {
-            workspace.register_action(open_project_tasks_file);
-
-            let Some(window) = window else {
-                return;
-            };
-            let panel_task = initialize_panels(window, cx);
-            workspace.set_panels_task(panel_task);
-        },
-    )
-    .detach();
-}
-
-fn open_project_tasks_file(
-    workspace: &mut Workspace,
-    _: &zed_actions::OpenProjectTasks,
-    window: &mut gpui::Window,
-    cx: &mut Context<Workspace>,
-) {
-    let Some(open) = open_local_workspace_file(
-        workspace,
-        paths::local_tasks_file_relative_path(),
-        settings::initial_tasks_content(),
-        window,
-        cx,
-    ) else {
-        gpui_ohos::log_message(
-            gpui_ohos::LogLevel::Warning,
-            "cannot open .zed/tasks.json because this workspace has no visible folder",
-        );
-        return;
-    };
-    open.detach_and_log_err(cx);
-}
-
-fn open_local_workspace_file(
-    workspace: &mut Workspace,
-    relative_path: &'static RelPath,
-    initial_contents: Cow<'static, str>,
-    window: &mut gpui::Window,
-    cx: &mut Context<Workspace>,
-) -> Option<gpui::Task<Result<Entity<Editor>>>> {
-    let project = workspace.project().clone();
-    let worktree = project
-        .read(cx)
-        .visible_worktrees(cx)
-        .find_map(|worktree| worktree.read(cx).root_entry()?.is_dir().then_some(worktree));
-    let worktree = worktree?;
-    let worktree_id = worktree.read(cx).id();
-
-    Some(cx.spawn_in(window, async move |workspace, cx| {
-        let absolute_path = worktree.read_with(cx, |worktree, _| {
-            worktree.abs_path().join(relative_path.as_std_path())
-        });
-        let fs = project.read_with(cx, |project, _| project.fs().clone());
-        let file_exists = fs
-            .metadata(&absolute_path)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|metadata| !metadata.is_dir && !metadata.is_fifo);
-
-        if !file_exists {
-            if let Some(parent) = relative_path.parent()
-                && worktree.read_with(cx, |worktree, _| worktree.entry_for_path(parent).is_none())
-            {
-                project
-                    .update(cx, |project, cx| {
-                        project.create_entry((worktree_id, parent), true, cx)
-                    })
-                    .await
-                    .context("worktree disappeared while creating .zed")?;
-            }
-            if worktree.read_with(cx, |worktree, _| {
-                worktree.entry_for_path(relative_path).is_none()
-            }) {
-                project
-                    .update(cx, |project, cx| {
-                        project.create_entry((worktree_id, relative_path), false, cx)
-                    })
-                    .await
-                    .context("worktree disappeared while creating tasks.json")?;
-            }
-        }
-
-        let editor = workspace
-            .update_in(cx, |workspace, window, cx| {
-                workspace.open_path((worktree_id, relative_path), None, true, window, cx)
-            })?
-            .await?
-            .downcast::<Editor>()
-            .context("expected tasks.json to open in an editor")?;
-        editor.update(cx, |editor, cx| {
-            if let Some(buffer) = editor.buffer().read(cx).as_singleton()
-                && buffer.read(cx).is_empty()
-            {
-                buffer.update(cx, |buffer, cx| {
-                    buffer.edit([(0..0, initial_contents)], None, cx)
-                });
-            }
-        });
-        Ok(editor)
-    }))
-}
-
-fn open_folder(cx: &mut App) {
-    gpui_ohos::log_message(
-        gpui_ohos::LogLevel::Info,
-        "dispatching the HarmonyOS Open Folder action",
-    );
-    let Some(window) = cx
-        .windows()
-        .into_iter()
-        .find_map(|window| window.downcast::<MultiWorkspace>())
-    else {
-        gpui_ohos::log_message(
-            gpui_ohos::LogLevel::Error,
-            "Open Folder could not find the HarmonyOS workspace window",
-        );
-        return;
-    };
-    let prompt = cx.prompt_for_paths(PathPromptOptions {
-        files: false,
-        directories: true,
-        multiple: false,
-        prompt: None,
-    });
-
-    cx.spawn(async move |cx| {
-        let paths = match prompt.await {
-            Ok(Ok(Some(paths))) => paths,
-            Ok(Ok(None)) => return Ok(()),
-            Ok(Err(error)) => {
-                gpui_ohos::log_message(
-                    gpui_ohos::LogLevel::Error,
-                    format!("HarmonyOS Open Folder failed: {error:#}"),
-                );
-                return Ok(());
-            }
-            Err(_) => {
-                gpui_ohos::log_message(
-                    gpui_ohos::LogLevel::Error,
-                    "HarmonyOS Open Folder channel closed before completion",
-                );
-                return Ok(());
-            }
-        };
-
-        let selected_paths = paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let persistent_uri = paths
-            .first()
-            .and_then(|path| gpui_ohos::persistent_uri_for_path(path));
-        let open = window.update(cx, |multi_workspace, window, cx| {
-            multi_workspace.open_project(paths, OpenMode::Activate, window, cx)
-        })?;
-        open.await?;
-        if let Some(uri) = persistent_uri {
-            let key_value_store = cx.update(|cx| KeyValueStore::global(cx));
-            cx.background_spawn(async move {
-                key_value_store
-                    .write_kvp(LAST_WORKSPACE_URI_KEY.to_owned(), uri)
-                    .await
-            })
-            .await
-            .context("remembering the last HarmonyOS workspace")?;
-        }
-        gpui_ohos::log_message(
-            gpui_ohos::LogLevel::Info,
-            format!("opened HarmonyOS workspace at {selected_paths}"),
-        );
-        Ok::<(), anyhow::Error>(())
-    })
-    .detach_and_log_err(cx);
-}
-
-/// Zed's application menu rendered by the production cross-platform title bar.
-/// HarmonyOS has no process-wide desktop menu, so the platform exposes these
-/// entries through the in-window hamburger/menu bar used on Linux and Windows.
-fn ohos_app_menus() -> Vec<Menu> {
-    vec![
-        Menu::new("Zed").items([
-            MenuItem::action("Sign In", client::SignIn),
-            MenuItem::action("Sign Out", client::SignOut),
-            MenuItem::separator(),
-            // Keep the primary file actions in the touch-accessible root menu
-            // as well as the full File menu. HarmonyOS pointer/touch input has
-            // no reliable hover gesture for switching an already-open desktop
-            // menu bar between top-level menus.
-            MenuItem::action("Open Folder…", OpenFolder),
-            MenuItem::action("Open File…", workspace::OpenFiles),
-            MenuItem::action("New File", workspace::NewFile),
-            MenuItem::action("Save", workspace::Save { save_intent: None }),
-            MenuItem::action("Save As…", workspace::SaveAs),
-            MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
-            MenuItem::separator(),
-            MenuItem::action("Settings", zed_actions::OpenSettings),
-            MenuItem::action("Keymap", zed_actions::OpenKeymap),
-            MenuItem::action(
-                "Select Theme…",
-                zed_actions::theme_selector::Toggle::default(),
-            ),
-            MenuItem::action("Extensions", zed_actions::Extensions::default()),
-            MenuItem::separator(),
-            MenuItem::action("Command Palette…", zed_actions::command_palette::Toggle),
-            MenuItem::separator(),
-            MenuItem::action("Quit Zed", zed_actions::Quit),
-        ]),
-        Menu::new("File").items([
-            MenuItem::action("New File", workspace::NewFile),
-            MenuItem::action("Open File…", workspace::OpenFiles),
-            MenuItem::action("Open Folder…", OpenFolder),
-            MenuItem::action("Open Recent…", zed_actions::OpenRecent::default()),
-            MenuItem::action("Add Folder to Project…", workspace::AddFolderToProject),
-            MenuItem::separator(),
-            MenuItem::action("Save", workspace::Save { save_intent: None }),
-            MenuItem::action("Save As…", workspace::SaveAs),
-            MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
-            MenuItem::separator(),
-            MenuItem::action(
-                "Close Editor",
-                workspace::CloseActiveItem {
-                    save_intent: None,
-                    close_pinned: true,
-                },
-            ),
-            MenuItem::action("Close Project", workspace::CloseProject),
-        ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Undo", editor::actions::Undo, OsAction::Undo),
-            MenuItem::os_action("Redo", editor::actions::Redo, OsAction::Redo),
-            MenuItem::separator(),
-            MenuItem::os_action("Cut", editor::actions::Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", editor::actions::Copy, OsAction::Copy),
-            MenuItem::action("Copy and Trim", editor::actions::CopyAndTrim),
-            MenuItem::os_action("Paste", editor::actions::Paste, OsAction::Paste),
-            MenuItem::separator(),
-            MenuItem::action("Find", search::buffer_search::Deploy::find()),
-            MenuItem::action("Find in Project", workspace::DeploySearch::default()),
-            MenuItem::separator(),
-            MenuItem::action(
-                "Toggle Line Comment",
-                editor::actions::ToggleComments::default(),
-            ),
-            MenuItem::os_action(
-                "Select All",
-                editor::actions::SelectAll,
-                OsAction::SelectAll,
-            ),
-        ]),
-        Menu::new("Selection").items([
-            MenuItem::os_action(
-                "Select All",
-                editor::actions::SelectAll,
-                OsAction::SelectAll,
-            ),
-            MenuItem::action("Expand Selection", editor::actions::SelectLargerSyntaxNode),
-            MenuItem::action("Shrink Selection", editor::actions::SelectSmallerSyntaxNode),
-            MenuItem::action("Select Next Sibling", editor::actions::SelectNextSyntaxNode),
-            MenuItem::action(
-                "Select Previous Sibling",
-                editor::actions::SelectPreviousSyntaxNode,
-            ),
-            MenuItem::separator(),
-            MenuItem::action(
-                "Add Cursor Above",
-                editor::actions::AddSelectionAbove {
-                    skip_soft_wrap: true,
-                },
-            ),
-            MenuItem::action(
-                "Add Cursor Below",
-                editor::actions::AddSelectionBelow {
-                    skip_soft_wrap: true,
-                },
-            ),
-            MenuItem::action(
-                "Select Next Occurrence",
-                editor::actions::SelectNext {
-                    replace_newest: false,
-                },
-            ),
-            MenuItem::action(
-                "Select Previous Occurrence",
-                editor::actions::SelectPrevious {
-                    replace_newest: false,
-                },
-            ),
-            MenuItem::action("Select All Occurrences", editor::actions::SelectAllMatches),
-            MenuItem::separator(),
-            MenuItem::action("Move Line Up", editor::actions::MoveLineUp),
-            MenuItem::action("Move Line Down", editor::actions::MoveLineDown),
-            MenuItem::action("Duplicate Selection", editor::actions::DuplicateLineDown),
-        ]),
-        Menu::new("View").items([
-            MenuItem::action(
-                "Zoom In",
-                zed_actions::IncreaseBufferFontSize { persist: false },
-            ),
-            MenuItem::action(
-                "Zoom Out",
-                zed_actions::DecreaseBufferFontSize { persist: false },
-            ),
-            MenuItem::action(
-                "Reset Zoom",
-                zed_actions::ResetBufferFontSize { persist: false },
-            ),
-            MenuItem::action(
-                "Reset All Zoom",
-                zed_actions::ResetAllZoom { persist: false },
-            ),
-            MenuItem::separator(),
-            MenuItem::action("Toggle Left Dock", workspace::ToggleLeftDock),
-            MenuItem::action("Toggle Right Dock", workspace::ToggleRightDock),
-            MenuItem::action("Toggle Bottom Dock", workspace::ToggleBottomDock),
-            MenuItem::action("Toggle All Docks", workspace::ToggleAllDocks),
-            MenuItem::submenu(Menu::new("Editor Layout").items([
-                MenuItem::action("Split Up", workspace::SplitUp::default()),
-                MenuItem::action("Split Down", workspace::SplitDown::default()),
-                MenuItem::action("Split Left", workspace::SplitLeft::default()),
-                MenuItem::action("Split Right", workspace::SplitRight::default()),
-            ])),
-            MenuItem::separator(),
-            MenuItem::action("Project Panel", zed_actions::project_panel::ToggleFocus),
-            MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
-            MenuItem::action("Terminal Panel", terminal_view::terminal_panel::Toggle),
-            MenuItem::action("Agent Panel", zed_actions::assistant::ToggleFocus),
-            MenuItem::action("Git Panel", zed_actions::git_panel::ToggleFocus),
-            MenuItem::separator(),
-            MenuItem::action("Diagnostics", diagnostics::Deploy),
-        ]),
-        Menu::new("Go").items([
-            MenuItem::action("Back", workspace::GoBack),
-            MenuItem::action("Forward", workspace::GoForward),
-            MenuItem::separator(),
-            MenuItem::action("Command Palette…", zed_actions::command_palette::Toggle),
-            MenuItem::action("Go to File…", workspace::ToggleFileFinder::default()),
-            MenuItem::action("Go to Symbol…", zed_actions::outline::ToggleOutline),
-            MenuItem::action("Go to Line/Column…", editor::actions::ToggleGoToLine),
-            MenuItem::separator(),
-            MenuItem::action(
-                "Go to Definition",
-                editor::actions::GoToDefinition::default(),
-            ),
-            MenuItem::action("Go to Declaration", editor::actions::GoToDeclaration),
-            MenuItem::action("Go to Type Definition", editor::actions::GoToTypeDefinition),
-            MenuItem::action(
-                "Find All References",
-                editor::actions::FindAllReferences::default(),
-            ),
-            MenuItem::separator(),
-            MenuItem::action("Next Problem", editor::actions::GoToDiagnostic::default()),
-            MenuItem::action(
-                "Previous Problem",
-                editor::actions::GoToPreviousDiagnostic::default(),
-            ),
-        ]),
-        Menu::new("Run").items([
-            MenuItem::action(
-                "Spawn Task",
-                zed_actions::Spawn::ViaModal {
-                    reveal_target: None,
-                },
-            ),
-            MenuItem::separator(),
-            MenuItem::action("Edit tasks.json…", zed_actions::OpenProjectTasks),
-        ]),
-        Menu::new("Help").items([
-            MenuItem::action("Show Welcome", onboarding::ShowWelcome),
-            MenuItem::separator(),
-            MenuItem::action("File Bug Report…", zed_actions::feedback::FileBugReport),
-            MenuItem::action("Request Feature…", zed_actions::feedback::RequestFeature),
-            MenuItem::action("Email Zed…", zed_actions::feedback::EmailZed),
-            MenuItem::separator(),
-            MenuItem::action("Zed Repository", feedback::OpenZedRepo),
-        ]),
-    ]
-}
-
-fn initialize_panels(
-    window: &mut gpui::Window,
-    cx: &mut Context<Workspace>,
-) -> gpui::Task<Result<()>> {
-    cx.spawn_in(window, async move |workspace, cx| {
-        let project_panel = ProjectPanel::load(workspace.clone(), cx.clone());
-        let outline_panel = OutlinePanel::load(workspace.clone(), cx.clone());
-        let terminal_panel = TerminalPanel::load(workspace.clone(), cx.clone());
-        let git_panel = GitPanel::load(workspace.clone(), cx.clone());
-        let agent_panel = AgentPanel::load(workspace.clone(), cx.clone());
-
-        futures::join!(
-            add_panel_when_ready("project", project_panel, workspace.clone(), cx.clone()),
-            add_panel_when_ready("outline", outline_panel, workspace.clone(), cx.clone()),
-            add_panel_when_ready("terminal", terminal_panel, workspace.clone(), cx.clone()),
-            add_panel_when_ready("git", git_panel, workspace.clone(), cx.clone()),
-            add_panel_when_ready("agent", agent_panel, workspace.clone(), cx.clone()),
-        );
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.open_panel::<AgentPanel>(window, cx);
-            workspace.open_panel::<ProjectPanel>(window, cx);
-            workspace.open_panel::<TerminalPanel>(window, cx);
-        })?;
-        Ok(())
-    })
-}
-
-async fn add_panel_when_ready<P>(
-    name: &'static str,
-    panel_task: impl Future<Output = Result<Entity<P>>> + 'static,
-    workspace: WeakEntity<Workspace>,
-    mut cx: AsyncWindowContext,
-) where
-    P: workspace::Panel + 'static,
-{
-    match panel_task.await {
-        Ok(panel) => {
-            if let Err(error) = workspace.update_in(&mut cx, |workspace, window, cx| {
-                workspace.add_panel(panel, window, cx);
-            }) {
-                gpui_ohos::log_message(
-                    gpui_ohos::LogLevel::Error,
-                    format!("failed to attach the HarmonyOS {name} panel: {error:#}"),
-                );
-            }
-        }
-        Err(error) => gpui_ohos::log_message(
-            gpui_ohos::LogLevel::Error,
-            format!("failed to load the HarmonyOS {name} panel: {error:#}"),
-        ),
-    }
 }
 
 fn load_embedded_fonts(cx: &App) -> Result<()> {

@@ -3,7 +3,7 @@ use std::process::Command;
 
 fn main() {
     #[cfg(target_os = "linux")]
-    {
+    if std::env::var_os("CARGO_CFG_TARGET_ENV").as_deref() != Some(std::ffi::OsStr::new("ohos")) {
         // Add rpaths for libraries that webrtc-sys dlopens at runtime.
         // This is mostly required for hosts with non-standard SO installation
         // locations such as NixOS.
@@ -212,7 +212,9 @@ fn main() {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    prepare_app_icon_x11();
+    if std::env::var_os("CARGO_CFG_TARGET_ENV").as_deref() != Some(std::ffi::OsStr::new("ohos")) {
+        prepare_app_icon_x11();
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

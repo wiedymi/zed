@@ -52,6 +52,7 @@ pub async fn download_server_binary(
     destination_path: &Path,
     asset_kind: AssetKind,
 ) -> Result<(), anyhow::Error> {
+    util::command::ExecutableOrigin::NativeDownload.ensure_supported()?;
     log::info!("downloading github artifact from {url}");
     let Some(destination_parent) = destination_path.parent() else {
         anyhow::bail!("destination path has no parent: {destination_path:?}");
@@ -84,6 +85,7 @@ pub async fn download_server_raw_binary(
     destination_path: &Path,
     binary_file_name: &str,
 ) -> Result<(), anyhow::Error> {
+    util::command::ExecutableOrigin::NativeDownload.ensure_supported()?;
     log::info!("downloading raw binary from {url}");
     let Some(destination_parent) = destination_path.parent() else {
         anyhow::bail!("destination path has no parent: {destination_path:?}");

@@ -575,6 +575,9 @@ impl ExtensionImports for WasmState {
     }
 
     async fn make_file_executable(&mut self, path: String) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = util::command::ExecutableOrigin::NativeDownload.ensure_supported() {
+            return Ok(Err(error.to_string()));
+        }
         let path = self
             .host
             .writeable_path_from_extension(&self.manifest.id, Path::new(&path))

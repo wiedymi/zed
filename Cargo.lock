@@ -8046,6 +8046,7 @@ dependencies = [
 name = "gpui_ohos"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "anyhow",
  "async-task",
  "etagere",
@@ -24060,9 +24061,17 @@ dependencies = [
  "client",
  "clock",
  "command_palette",
+ "copilot_chat",
+ "copilot_ui",
  "csv_preview",
+ "dap_adapters",
  "db",
+ "debug_adapter_extension",
+ "debugger_tools",
+ "debugger_ui",
  "diagnostics",
+ "edit_prediction",
+ "edit_prediction_ui",
  "editor",
  "encoding_selector",
  "extension",
@@ -24082,6 +24091,7 @@ dependencies = [
  "gpui_tokio",
  "http_client",
  "image_viewer",
+ "journal",
  "json_schema_store",
  "keymap_editor",
  "language",
@@ -24112,6 +24122,7 @@ dependencies = [
  "prompt_store",
  "recent_projects",
  "release_channel",
+ "repl",
  "reqwest_client",
  "rust-embed",
  "search",
@@ -24142,7 +24153,9 @@ dependencies = [
  "which_key",
  "workspace",
  "worktree",
+ "zed",
  "zed_actions",
+ "zed_credentials_provider",
 ]
 
 [[package]]

@@ -583,7 +583,7 @@ fn main() {
 
         Client::set_global(client.clone(), cx);
 
-        zed::init(cx);
+        zed::init(stdout_is_a_pty(), cx);
         #[cfg(target_os = "macos")]
         zed::move_to_applications::init(cx);
         project::Project::init(&client, cx);
@@ -868,7 +868,7 @@ fn main() {
             }
         }
 
-        initialize_workspace(app_state.clone(), cx);
+        initialize_workspace(app_state.clone(), zed::ProductPlatform::Desktop, cx);
 
         cx.activate(true);
 

@@ -1,4 +1,5 @@
-import { FrameCallback, UIContext } from '@kit.ArkUI';
+import { FrameCallback, UIContext, dragController } from '@kit.ArkUI';
+import { accessibility } from '@kit.AccessibilityKit';
 import {
   AbilityConstant,
   AbilityLifecycleCallback,
@@ -12,13 +13,14 @@ import {
   common,
   wantAgent
 } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, thermal } from '@kit.BasicServicesKit';
+import { unifiedDataChannel } from '@kit.ArkData';
 import { fileUri, picker } from '@kit.CoreFileKit';
 import { pointer } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { controlWindow, setWindowStateHandler } from '../entryability/AuxiliaryWindow';
-import { setNotificationResponseHandler } from '../entryability/NativeBridge';
+import { setNotificationResponseHandler, setOpenUrlsHandler } from '../entryability/NativeBridge';
 import { dispatchFileDrag, FileDropNativeContext, fileDropTypes } from '../entryability/FileDrop';
 
 const LOG_DOMAIN = 0xD002;
@@ -36,6 +38,7 @@ interface ZedNativeContext extends FileDropNativeContext {
     requestFrame: () => void,
     openExternalUrl: (url: string) => void,
     openExternalPath: (path: string, reveal: boolean) => void,
+    startOutboundDrag: (windowId: number, paths: Array<string>, directories: Array<boolean>) => void,
     setCursor: (style: number, visible: boolean) => void,
     controlWindow: (
       windowId: number,
@@ -78,6 +81,10 @@ interface ZedNativeContext extends FileDropNativeContext {
     cacheDir: string
   ): void;
   setScaleFactor(scaleFactor: number): void;
+  setSystemAppearance(colorMode: number): void;
+  setThermalLevel(level: number): void;
+  setAccessibilityEnabled(enabled: boolean): void;
+  handleOpenUrls(urls: Array<string>): void;
   dispatchKeyEvent(
     windowId: number,
     action: number,
@@ -134,6 +141,77 @@ struct Index {
   private nativeContext: ZedNativeContext | undefined;
   private unregisterLifecycle: (() => void) | undefined;
   private unregisterEnvironment: (() => void) | undefined;
+  private unregisterThermal: (() => void) | undefined;
+  private unregisterAccessibility: (() => void) | undefined;
+
+  @Builder
+  private outboundDragPreview(count: number) {
+    Row({ space: 8 }) {
+      Image($r('app.media.zed_icon'))
+        .width(28)
+        .height(28)
+      Text(count === 1 ? '1 item' : `${count} items`)
+        .fontSize(14)
+        .fontColor(Color.White)
+    }
+    .padding(8)
+    .borderRadius(8)
+    .backgroundColor('#CC18181B')
+  }
+
+  private startOutboundDrag(
+    uiContext: UIContext,
+    windowId: number,
+    paths: Array<string>,
+    directories: Array<boolean>
+  ): void {
+    if (paths.length === 0 || paths.length !== directories.length) {
+      hilog.error(
+        LOG_DOMAIN,
+        LOG_TAG,
+        'Rejected invalid outbound drag for window %{public}d',
+        windowId
+      );
+      return;
+    }
+
+    try {
+      const data = new unifiedDataChannel.UnifiedData();
+      for (let index = 0; index < paths.length; index += 1) {
+        const record = directories[index]
+          ? new unifiedDataChannel.Folder()
+          : new unifiedDataChannel.File();
+        record.uri = fileUri.getUriFromPath(paths[index]);
+        data.addRecord(record);
+      }
+      const dragInfo: dragController.DragInfo = {
+        pointerId: 0,
+        data: data
+      };
+      uiContext.getDragController().executeDrag(
+        () => {
+          this.outboundDragPreview(paths.length);
+        },
+        dragInfo
+      ).catch((error: Error): void => {
+        hilog.error(
+          LOG_DOMAIN,
+          LOG_TAG,
+          'Outbound drag failed for window %{public}d: %{public}s',
+          windowId,
+          JSON.stringify(error)
+        );
+      });
+    } catch (error) {
+      hilog.error(
+        LOG_DOMAIN,
+        LOG_TAG,
+        'Unable to prepare outbound drag for window %{public}d: %{public}s',
+        windowId,
+        JSON.stringify(error)
+      );
+    }
+  }
 
   private dispatchNativeKeyEvent(event: KeyEvent): boolean {
     const nativeContext = this.nativeContext;
@@ -160,7 +238,7 @@ struct Index {
     );
   }
 
-  private createNotificationWantAgent(
+  private async createNotificationWantAgent(
     requestCode: number,
     tag: string,
     actionId: string
@@ -179,7 +257,11 @@ struct Index {
       requestCode: requestCode,
       actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
     };
-    return wantAgent.getWantAgent(info);
+    try {
+      return await wantAgent.getWantAgent(info);
+    } catch (error) {
+      throw new Error(`Unable to create a HarmonyOS notification action: ${JSON.stringify(error)}`);
+    }
   }
 
   private async publishSystemNotification(
@@ -191,43 +273,47 @@ struct Index {
     actionIds: Array<string>,
     actionLabels: Array<string>
   ): Promise<void> {
-    if (actionIds.length !== actionLabels.length) {
-      throw new Error('System notification action IDs and labels have different lengths');
+    try {
+      if (actionIds.length !== actionLabels.length) {
+        throw new Error('System notification action IDs and labels have different lengths');
+      }
+      if (!await notificationManager.isNotificationEnabled()) {
+        await notificationManager.requestEnableNotification(abilityContext);
+      }
+      const bodyWantAgent = await this.createNotificationWantAgent(id * 64, tag, '');
+      const actionButtons: Array<notificationManager.NotificationActionButton> = [];
+      for (let index = 0; index < actionIds.length; index += 1) {
+        const actionId = actionIds[index];
+        const actionLabel = actionLabels[index];
+        const actionWantAgent = await this.createNotificationWantAgent(
+          id * 64 + index + 1,
+          tag,
+          actionId
+        );
+        actionButtons.push({
+          title: actionLabel,
+          wantAgent: actionWantAgent
+        });
+      }
+      const request: notificationManager.NotificationRequest = {
+        id: id,
+        label: tag,
+        notificationSlotType: notificationManager.SlotType.OTHER_TYPES,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: {
+            title: title,
+            text: body
+          }
+        },
+        wantAgent: bodyWantAgent,
+        actionButtons: actionButtons,
+        tapDismissed: true
+      };
+      await notificationManager.publish(request);
+    } catch (error) {
+      throw new Error(`Unable to publish HarmonyOS notification ${tag}: ${JSON.stringify(error)}`);
     }
-    if (!await notificationManager.isNotificationEnabled()) {
-      await notificationManager.requestEnableNotification(abilityContext);
-    }
-    const bodyWantAgent = await this.createNotificationWantAgent(id * 64, tag, '');
-    const actionButtons: Array<notificationManager.NotificationActionButton> = [];
-    for (let index = 0; index < actionIds.length; index += 1) {
-      const actionId = actionIds[index];
-      const actionLabel = actionLabels[index];
-      const actionWantAgent = await this.createNotificationWantAgent(
-        id * 64 + index + 1,
-        tag,
-        actionId
-      );
-      actionButtons.push({
-        title: actionLabel,
-        wantAgent: actionWantAgent
-      });
-    }
-    const request: notificationManager.NotificationRequest = {
-      id: id,
-      label: tag,
-      notificationSlotType: notificationManager.SlotType.OTHER_TYPES,
-      content: {
-        notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-        normal: {
-          title: title,
-          text: body
-        }
-      },
-      wantAgent: bodyWantAgent,
-      actionButtons: actionButtons,
-      tapDismissed: true
-    };
-    await notificationManager.publish(request);
   }
 
   private controlApplication(
@@ -235,31 +321,42 @@ struct Index {
     command: number
   ): void {
     let operation: Promise<void>;
-    switch (command as ApplicationCommand) {
-      case ApplicationCommand.ACTIVATE:
-        controlWindow(0, 2, '', 0, 0, 0, 0);
-        operation = abilityContext.startAbility({
-          bundleName: 'dev.zed.Zed',
-          abilityName: 'EntryAbility'
-        });
-        break;
-      case ApplicationCommand.BACKGROUND:
-        operation = abilityContext.moveAbilityToBackground();
-        break;
-      case ApplicationCommand.RESTART:
-        operation = abilityContext.restartApp({
-          bundleName: 'dev.zed.Zed',
-          abilityName: 'EntryAbility'
-        });
-        break;
-      default:
-        hilog.error(
-          LOG_DOMAIN,
-          LOG_TAG,
-          'Unknown application command %{public}d',
-          command
-        );
-        return;
+    try {
+      switch (command as ApplicationCommand) {
+        case ApplicationCommand.ACTIVATE:
+          controlWindow(0, 2, '', 0, 0, 0, 0);
+          operation = abilityContext.startAbility({
+            bundleName: 'dev.zed.Zed',
+            abilityName: 'EntryAbility'
+          });
+          break;
+        case ApplicationCommand.BACKGROUND:
+          operation = abilityContext.moveAbilityToBackground();
+          break;
+        case ApplicationCommand.RESTART:
+          operation = abilityContext.restartApp({
+            bundleName: 'dev.zed.Zed',
+            abilityName: 'EntryAbility'
+          });
+          break;
+        default:
+          hilog.error(
+            LOG_DOMAIN,
+            LOG_TAG,
+            'Unknown application command %{public}d',
+            command
+          );
+          return;
+      }
+    } catch (error) {
+      hilog.error(
+        LOG_DOMAIN,
+        LOG_TAG,
+        'HarmonyOS application command %{public}d failed before it started: %{public}s',
+        command,
+        JSON.stringify(error)
+      );
+      return;
     }
     operation.catch((error: Error): void => {
       hilog.error(
@@ -277,7 +374,12 @@ struct Index {
     this.unregisterLifecycle = undefined;
     this.unregisterEnvironment?.();
     this.unregisterEnvironment = undefined;
+    this.unregisterThermal?.();
+    this.unregisterThermal = undefined;
+    this.unregisterAccessibility?.();
+    this.unregisterAccessibility = undefined;
     setNotificationResponseHandler(undefined);
+    setOpenUrlsHandler(undefined);
     setWindowStateHandler(undefined);
     this.nativeContext?.setLifecyclePhase(2);
   }
@@ -335,6 +437,8 @@ struct Index {
                 JSON.stringify(error)
               );
             }
+          }, (windowId: number, paths: Array<string>, directories: Array<boolean>) => {
+            this.startOutboundDrag(uiContext, windowId, paths, directories);
           }, (style: number, visible: boolean) => {
             const cursorController = uiContext.getCursorController();
             const cursorStyles: Array<pointer.PointerStyle> = [
@@ -540,6 +644,17 @@ struct Index {
           setNotificationResponseHandler((tag: string, actionId?: string): void => {
             zedContext.handleSystemNotificationResponse(tag, actionId);
           });
+          setOpenUrlsHandler((urls: Array<string>): void => {
+            zedContext.handleOpenUrls(urls);
+          });
+          const accessibilityStateChanged = (enabled: boolean): void => {
+            zedContext.setAccessibilityEnabled(enabled);
+          };
+          zedContext.setAccessibilityEnabled(accessibility.isOpenAccessibilitySync());
+          accessibility.on('accessibilityStateChange', accessibilityStateChanged);
+          this.unregisterAccessibility = (): void => {
+            accessibility.off('accessibilityStateChange', accessibilityStateChanged);
+          };
           zedContext.setScaleFactor(scaleFactor);
           zedContext.onFrame();
           frameCallback.request(uiContext);
@@ -566,8 +681,33 @@ struct Index {
               );
             });
           };
+          const initialColorMode = abilityContext.config.colorMode;
+          if (typeof initialColorMode === 'number') {
+            zedContext.setSystemAppearance(initialColorMode);
+          }
+          try {
+            zedContext.setThermalLevel(thermal.getLevel());
+            const thermalCallback = (level: thermal.ThermalLevel): void => {
+              zedContext.setThermalLevel(level);
+            };
+            thermal.registerThermalLevelCallback(thermalCallback);
+            this.unregisterThermal = (): void => {
+              thermal.unregisterThermalLevelCallback();
+            };
+          } catch (error) {
+            hilog.error(
+              LOG_DOMAIN,
+              LOG_TAG,
+              'Failed to monitor thermal state: %{public}s',
+              JSON.stringify(error)
+            );
+          }
           const environmentCallback: EnvironmentCallback = {
-            onConfigurationUpdated: (_configuration: Configuration): void => {},
+            onConfigurationUpdated: (configuration: Configuration): void => {
+              if (typeof configuration.colorMode === 'number') {
+                zedContext.setSystemAppearance(configuration.colorMode);
+              }
+            },
             onMemoryLevel: (_level: AbilityConstant.MemoryLevel): void => zedContext.handleMemoryWarning()
           };
           const environmentCallbackId = applicationContext.on('environment', environmentCallback);

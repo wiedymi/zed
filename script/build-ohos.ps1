@@ -751,7 +751,12 @@ function Sign-Hap {
         'ohos.permission.READ_PASTEBOARD',
         'ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE'
     )
-    $Profile | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $UnsignedProfile -Encoding utf8NoBOM
+    $ProfileJson = $Profile | ConvertTo-Json -Depth 20
+    [System.IO.File]::WriteAllText(
+        $UnsignedProfile,
+        $ProfileJson,
+        [System.Text.UTF8Encoding]::new($false)
+    )
 
     # The public SDK keystore exposes a self-signed certificate for the application
     # key. The profile template contains the CA-signed form of that same public key,

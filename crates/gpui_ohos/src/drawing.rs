@@ -1,12 +1,18 @@
-#[cfg(debug_assertions)]
-use std::time::{Duration, Instant};
 use std::{cell::RefCell, collections::HashMap, ffi::c_void, ptr::NonNull, sync::Arc};
+#[cfg(debug_assertions)]
+use std::{
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
-    AtlasTextureKind, BackgroundKind, BorderStyle, Bounds, Corners, Edges, LinearColorStop,
-    MonochromeSprite, Path, PolychromeSprite, PrimitiveBatch, Quad, Rgba, ScaledPixels, Scene,
-    Shadow, SubpixelSprite, Underline,
+    AtlasTextureKind, BackgroundKind, BorderStyle, Bounds, ColorSpace, Corners, Edges,
+    LinearColorStop, MonochromeSprite, Path, PolychromeSprite, PrimitiveBatch, Quad, Rgba,
+    ScaledPixels, Scene, Shadow, SubpixelSprite, Underline,
 };
 
 use crate::atlas::{OhosAtlas, TilePixels};
@@ -30,6 +36,153 @@ use ohos_sys::native_window::{
     NativeWindowOperation, OH_NativeWindow_NativeWindowHandleOpt,
     OH_NativeWindow_NativeWindowSetScalingModeV2, OHScalingModeV2,
 };
+
+#[derive(Clone, Copy)]
+enum NativeObjectKind {
+    GpuContext,
+    Surface,
+    RecordUtils,
+    RecordCommand,
+    Bitmap,
+    Sampling,
+    Filter,
+    MaskFilter,
+    Brush,
+    Point,
+    Matrix,
+    Shader,
+    Rect,
+    RoundRect,
+    Pen,
+    PathEffect,
+    Path,
+}
+
+#[cfg(debug_assertions)]
+impl NativeObjectKind {
+    const ALL: [Self; 17] = [
+        Self::GpuContext,
+        Self::Surface,
+        Self::RecordUtils,
+        Self::RecordCommand,
+        Self::Bitmap,
+        Self::Sampling,
+        Self::Filter,
+        Self::MaskFilter,
+        Self::Brush,
+        Self::Point,
+        Self::Matrix,
+        Self::Shader,
+        Self::Rect,
+        Self::RoundRect,
+        Self::Pen,
+        Self::PathEffect,
+        Self::Path,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::GpuContext => "gpu-context",
+            Self::Surface => "surface",
+            Self::RecordUtils => "record-utils",
+            Self::RecordCommand => "record-command",
+            Self::Bitmap => "bitmap",
+            Self::Sampling => "sampling",
+            Self::Filter => "filter",
+            Self::MaskFilter => "mask-filter",
+            Self::Brush => "brush",
+            Self::Point => "point",
+            Self::Matrix => "matrix",
+            Self::Shader => "shader",
+            Self::Rect => "rect",
+            Self::RoundRect => "round-rect",
+            Self::Pen => "pen",
+            Self::PathEffect => "path-effect",
+            Self::Path => "path",
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+struct NativeObjectCounter {
+    live: AtomicUsize,
+    peak: AtomicUsize,
+    created: AtomicUsize,
+}
+
+#[cfg(debug_assertions)]
+fn native_object_counters() -> &'static [NativeObjectCounter; NativeObjectKind::ALL.len()] {
+    static COUNTERS: OnceLock<[NativeObjectCounter; NativeObjectKind::ALL.len()]> = OnceLock::new();
+    COUNTERS.get_or_init(|| {
+        std::array::from_fn(|_| NativeObjectCounter {
+            live: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            created: AtomicUsize::new(0),
+        })
+    })
+}
+
+#[cfg(debug_assertions)]
+fn track_native_object<T>(kind: NativeObjectKind, value: T) -> T {
+    let counter = &native_object_counters()[kind.index()];
+    let live = counter.live.fetch_add(1, Ordering::Relaxed) + 1;
+    counter.created.fetch_add(1, Ordering::Relaxed);
+    counter.peak.fetch_max(live, Ordering::Relaxed);
+    value
+}
+
+#[cfg(not(debug_assertions))]
+fn track_native_object<T>(_kind: NativeObjectKind, value: T) -> T {
+    value
+}
+
+#[cfg(debug_assertions)]
+fn release_native_object(kind: NativeObjectKind) {
+    let counter = &native_object_counters()[kind.index()];
+    if counter
+        .live
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+            live.checked_sub(1)
+        })
+        .is_err()
+    {
+        crate::log_message(
+            crate::LogLevel::Error,
+            format!(
+                "Native Drawing {} lifetime counter underflowed",
+                kind.name()
+            ),
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn release_native_object(_kind: NativeObjectKind) {}
+
+#[cfg(debug_assertions)]
+fn native_object_profile() -> String {
+    NativeObjectKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            let counter = &native_object_counters()[kind.index()];
+            let created = counter.created.load(Ordering::Relaxed);
+            (created > 0).then(|| {
+                format!(
+                    "{}={}/{}/{}",
+                    kind.name(),
+                    counter.live.load(Ordering::Relaxed),
+                    counter.peak.load(Ordering::Relaxed),
+                    created,
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 pub struct NativeDrawingSurface {
     gpu_context: NonNull<OH_Drawing_GpuContext>,
@@ -107,6 +260,8 @@ impl NativeDrawingSurface {
             unsafe { gpu_context::OH_Drawing_GpuContextDestroy(gpu_context.as_ptr()) };
             bail!("OH_Drawing_SurfaceCreateOnScreen returned null");
         };
+        track_native_object(NativeObjectKind::GpuContext, ());
+        track_native_object(NativeObjectKind::Surface, ());
 
         Ok(Self {
             gpu_context,
@@ -139,6 +294,7 @@ impl NativeDrawingSurface {
         // SAFETY: `previous` was uniquely owned and has been removed from the
         // struct, so Drop cannot destroy it again if rebinding fails.
         unsafe { surface::OH_Drawing_SurfaceDestroy(previous.as_ptr()) };
+        release_native_object(NativeObjectKind::Surface);
 
         let image_info = configure_native_window(self.window, width, height)?;
         // SAFETY: The GPU context and NativeWindow remain live for the whole
@@ -151,6 +307,7 @@ impl NativeDrawingSurface {
             )
         })
         .ok_or_else(|| anyhow!("OH_Drawing_SurfaceCreateOnScreen returned null during resize"))?;
+        track_native_object(NativeObjectKind::Surface, ());
         self.surface = Some(replacement);
         self.width = width;
         self.height = height;
@@ -262,11 +419,39 @@ impl NativeDrawingSurface {
                 );
             }
         }
-        if self.frame_id % 120 == 0 {
+        if self.frame_id.is_multiple_of(120) {
             let oldest_frame = self.frame_id.saturating_sub(120);
             self.sprite_bitmaps
                 .borrow_mut()
                 .retain(|_, bitmap| bitmap.last_used_frame >= oldest_frame);
+            #[cfg(debug_assertions)]
+            {
+                let cached_bitmaps = self.sprite_bitmaps.borrow();
+                let cached_bitmap_bytes = cached_bitmaps.values().fold(0usize, |total, bitmap| {
+                    total.saturating_add(bitmap.bitmap._pixels.len())
+                });
+                let path_vertices = scene.paths.iter().fold(0usize, |total, path| {
+                    total.saturating_add(path.vertices.len())
+                });
+                crate::log_message(
+                    crate::LogLevel::Debug,
+                    format!(
+                        "Native Drawing profile frame={}: shadows={} quads={} paths={}/{}-vertices underlines={} sprites={}/{}/{} cached-bitmaps={}/{}-bytes native(live/peak/created): {}",
+                        self.frame_id,
+                        scene.shadows.len(),
+                        scene.quads.len(),
+                        scene.paths.len(),
+                        path_vertices,
+                        scene.underlines.len(),
+                        scene.monochrome_sprites.len(),
+                        scene.subpixel_sprites.len(),
+                        scene.polychrome_sprites.len(),
+                        cached_bitmaps.len(),
+                        cached_bitmap_bytes,
+                        native_object_profile(),
+                    ),
+                );
+            }
         }
         Ok(())
     }
@@ -307,10 +492,11 @@ impl NativeDrawingSurface {
             }
             BackgroundKind::LinearGradient {
                 angle,
-                color_space: _,
+                color_space,
                 colors,
             } => {
-                let native_brush = OwnedBrush::linear_gradient(quad.bounds, angle, colors)?;
+                let native_brush =
+                    OwnedBrush::linear_gradient(quad.bounds, angle, color_space, colors)?;
                 self.draw_brush_in_round_shape(
                     native_canvas,
                     &content_mask,
@@ -648,10 +834,11 @@ impl NativeDrawingSurface {
             }
             BackgroundKind::LinearGradient {
                 angle,
-                color_space: _,
+                color_space,
                 colors,
             } => {
-                let native_brush = OwnedBrush::linear_gradient(scene_path.bounds, angle, colors)?;
+                let native_brush =
+                    OwnedBrush::linear_gradient(scene_path.bounds, angle, color_space, colors)?;
                 draw_brush_in_path(native_canvas, &content_mask, &native_path, &native_brush);
             }
             BackgroundKind::PatternSlash {
@@ -1023,8 +1210,10 @@ impl Drop for NativeDrawingSurface {
         unsafe {
             if let Some(native_surface) = self.surface.take() {
                 surface::OH_Drawing_SurfaceDestroy(native_surface.as_ptr());
+                release_native_object(NativeObjectKind::Surface);
             }
             gpu_context::OH_Drawing_GpuContextDestroy(self.gpu_context.as_ptr());
+            release_native_object(NativeObjectKind::GpuContext);
         }
     }
 }
@@ -1035,7 +1224,7 @@ impl OwnedRecordCmdUtils {
     fn new() -> Result<Self> {
         // SAFETY: Creates a new independently owned recording utility.
         NonNull::new(unsafe { record_cmd::OH_Drawing_RecordCmdUtilsCreate() })
-            .map(Self)
+            .map(|native| track_native_object(NativeObjectKind::RecordUtils, Self(native)))
             .ok_or_else(|| anyhow!("OH_Drawing_RecordCmdUtilsCreate returned null"))
     }
 
@@ -1068,7 +1257,9 @@ impl OwnedRecordCmdUtils {
         }
         .map_err(|error| anyhow!("OH_Drawing_RecordCmdUtilsFinishRecording failed: {error:?}"))?;
         NonNull::new(commands)
-            .map(OwnedRecordCmd)
+            .map(|native| {
+                track_native_object(NativeObjectKind::RecordCommand, OwnedRecordCmd(native))
+            })
             .ok_or_else(|| anyhow!("OH_Drawing_RecordCmdUtilsFinishRecording returned null"))
     }
 }
@@ -1083,6 +1274,7 @@ impl Drop for OwnedRecordCmdUtils {
                 format!("OH_Drawing_RecordCmdUtilsDestroy failed: {error:?}"),
             );
         }
+        release_native_object(NativeObjectKind::RecordUtils);
     }
 }
 
@@ -1097,6 +1289,7 @@ impl Drop for OwnedRecordCmd {
                 format!("OH_Drawing_RecordCmdDestroy failed: {error:?}"),
             );
         }
+        release_native_object(NativeObjectKind::RecordCommand);
     }
 }
 
@@ -1131,10 +1324,13 @@ impl OwnedBitmap {
             )
         })
         .ok_or_else(|| anyhow!("OH_Drawing_BitmapCreateFromPixels returned null"))?;
-        Ok(Self {
-            native,
-            _pixels: pixels,
-        })
+        Ok(track_native_object(
+            NativeObjectKind::Bitmap,
+            Self {
+                native,
+                _pixels: pixels,
+            },
+        ))
     }
 }
 
@@ -1142,6 +1338,7 @@ impl Drop for OwnedBitmap {
     fn drop(&mut self) {
         // SAFETY: The bitmap is uniquely owned by this value.
         unsafe { bitmap::OH_Drawing_BitmapDestroy(self.native.as_ptr()) };
+        release_native_object(NativeObjectKind::Bitmap);
     }
 }
 
@@ -1156,7 +1353,7 @@ impl OwnedSamplingOptions {
                 OH_Drawing_MipmapMode::MIPMAP_MODE_NONE,
             )
         })
-        .map(Self)
+        .map(|native| track_native_object(NativeObjectKind::Sampling, Self(native)))
         .ok_or_else(|| anyhow!("OH_Drawing_SamplingOptionsCreate returned null"))
     }
 }
@@ -1165,6 +1362,7 @@ impl Drop for OwnedSamplingOptions {
     fn drop(&mut self) {
         // SAFETY: The sampling options are uniquely owned by this value.
         unsafe { sampling_options::OH_Drawing_SamplingOptionsDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::Sampling);
     }
 }
 
@@ -1192,6 +1390,8 @@ impl OwnedBlur {
         };
         // SAFETY: Both objects are live and remain owned by this value.
         unsafe { filter::OH_Drawing_FilterSetMaskFilter(filter.as_ptr(), mask.as_ptr()) };
+        track_native_object(NativeObjectKind::Filter, ());
+        track_native_object(NativeObjectKind::MaskFilter, ());
         Ok(Self { filter, mask })
     }
 }
@@ -1203,6 +1403,8 @@ impl Drop for OwnedBlur {
             filter::OH_Drawing_FilterDestroy(self.filter.as_ptr());
             mask_filter::OH_Drawing_MaskFilterDestroy(self.mask.as_ptr());
         }
+        release_native_object(NativeObjectKind::Filter);
+        release_native_object(NativeObjectKind::MaskFilter);
     }
 }
 
@@ -1222,11 +1424,14 @@ impl OwnedBrush {
             brush::OH_Drawing_BrushSetAntiAlias(brush.as_ptr(), true);
             brush::OH_Drawing_BrushSetColor(brush.as_ptr(), color);
         }
-        Ok(Self {
-            native: brush,
-            _blur: None,
-            _shader: None,
-        })
+        Ok(track_native_object(
+            NativeObjectKind::Brush,
+            Self {
+                native: brush,
+                _blur: None,
+                _shader: None,
+            },
+        ))
     }
 
     fn new_blurred(color: u32, sigma: f32, blend_mode: OH_Drawing_BlendMode) -> Result<Self> {
@@ -1254,10 +1459,11 @@ impl OwnedBrush {
     fn linear_gradient(
         bounds: Bounds<ScaledPixels>,
         angle: f32,
+        color_space: ColorSpace,
         stops: [LinearColorStop; 2],
     ) -> Result<Self> {
         let mut native_brush = Self::new(0xFFFFFFFF)?;
-        let shader = OwnedShaderEffect::linear_gradient(bounds, angle, stops)?;
+        let shader = OwnedShaderEffect::linear_gradient(bounds, angle, color_space, stops)?;
         // SAFETY: Both handles remain live together in this wrapper until the
         // native brush has been destroyed.
         unsafe {
@@ -1275,6 +1481,7 @@ impl Drop for OwnedBrush {
     fn drop(&mut self) {
         // SAFETY: The brush is uniquely owned by this value.
         unsafe { brush::OH_Drawing_BrushDestroy(self.native.as_ptr()) };
+        release_native_object(NativeObjectKind::Brush);
     }
 }
 
@@ -1284,7 +1491,7 @@ impl OwnedPoint {
     fn new(x: f32, y: f32) -> Result<Self> {
         // SAFETY: Creates a new, independently owned point.
         NonNull::new(unsafe { point::OH_Drawing_PointCreate(x, y) })
-            .map(Self)
+            .map(|native| track_native_object(NativeObjectKind::Point, Self(native)))
             .ok_or_else(|| anyhow!("OH_Drawing_PointCreate returned null"))
     }
 }
@@ -1293,6 +1500,7 @@ impl Drop for OwnedPoint {
     fn drop(&mut self) {
         // SAFETY: The point is uniquely owned by this value.
         unsafe { point::OH_Drawing_PointDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::Point);
     }
 }
 
@@ -1319,7 +1527,7 @@ impl OwnedMatrix {
                 1.0,
             )
         };
-        Ok(Self(native))
+        Ok(track_native_object(NativeObjectKind::Matrix, Self(native)))
     }
 }
 
@@ -1327,6 +1535,7 @@ impl Drop for OwnedMatrix {
     fn drop(&mut self) {
         // SAFETY: The matrix is uniquely owned by this value.
         unsafe { matrix::OH_Drawing_MatrixDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::Matrix);
     }
 }
 
@@ -1334,14 +1543,15 @@ struct OwnedShaderEffect {
     native: NonNull<OH_Drawing_ShaderEffect>,
     _start: OwnedPoint,
     _end: OwnedPoint,
-    _colors: [u32; 2],
-    _positions: [f32; 2],
+    _colors: Vec<u32>,
+    _positions: Vec<f32>,
 }
 
 impl OwnedShaderEffect {
     fn linear_gradient(
         bounds: Bounds<ScaledPixels>,
         angle: f32,
+        color_space: ColorSpace,
         stops: [LinearColorStop; 2],
     ) -> Result<Self> {
         let width = bounds.size.width.0.max(f32::EPSILON);
@@ -1375,8 +1585,8 @@ impl OwnedShaderEffect {
         );
         let start = OwnedPoint::new(center.0 - span.0 * 0.5, center.1 - span.1 * 0.5)?;
         let end = OwnedPoint::new(center.0 + span.0 * 0.5, center.1 + span.1 * 0.5)?;
-        let colors = [argb(stops[0].color.to_rgb()), argb(stops[1].color.to_rgb())];
-        let positions = [stops[0].percentage, stops[1].percentage];
+        let (colors, positions) = gradient_samples(color_space, stops);
+        let color_count = u32::try_from(colors.len()).context("gradient stop count exceeds u32")?;
         // SAFETY: Both points and backing arrays remain live in the returned
         // owner for at least as long as the native shader effect.
         let native = NonNull::new(unsafe {
@@ -1385,18 +1595,21 @@ impl OwnedShaderEffect {
                 end.0.as_ptr(),
                 colors.as_ptr(),
                 positions.as_ptr(),
-                2,
+                color_count,
                 shader_effect::OH_Drawing_TileMode::CLAMP,
             )
         })
         .ok_or_else(|| anyhow!("OH_Drawing_ShaderEffectCreateLinearGradient returned null"))?;
-        Ok(Self {
-            native,
-            _start: start,
-            _end: end,
-            _colors: colors,
-            _positions: positions,
-        })
+        Ok(track_native_object(
+            NativeObjectKind::Shader,
+            Self {
+                native,
+                _start: start,
+                _end: end,
+                _colors: colors,
+                _positions: positions,
+            },
+        ))
     }
 }
 
@@ -1404,6 +1617,7 @@ impl Drop for OwnedShaderEffect {
     fn drop(&mut self) {
         // SAFETY: The shader effect is uniquely owned by this value.
         unsafe { shader_effect::OH_Drawing_ShaderEffectDestroy(self.native.as_ptr()) };
+        release_native_object(NativeObjectKind::Shader);
     }
 }
 
@@ -1413,7 +1627,7 @@ impl OwnedRect {
     fn new(left: f32, top: f32, right: f32, bottom: f32) -> Result<Self> {
         // SAFETY: Creates a new rectangle released by `Drop`.
         NonNull::new(unsafe { rect::OH_Drawing_RectCreate(left, top, right, bottom) })
-            .map(Self)
+            .map(|native| track_native_object(NativeObjectKind::Rect, Self(native)))
             .ok_or_else(|| anyhow!("OH_Drawing_RectCreate returned null"))
     }
 
@@ -1431,6 +1645,7 @@ impl Drop for OwnedRect {
     fn drop(&mut self) {
         // SAFETY: The rectangle is uniquely owned by this value.
         unsafe { rect::OH_Drawing_RectDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::Rect);
     }
 }
 
@@ -1471,7 +1686,10 @@ impl OwnedRoundRect {
                 radii.bottom_left.0,
             );
         }
-        Ok(Self(native))
+        Ok(track_native_object(
+            NativeObjectKind::RoundRect,
+            Self(native),
+        ))
     }
 
     fn new_elliptical(rect: &OwnedRect, radii: [(f32, f32); 4]) -> Result<Self> {
@@ -1491,7 +1709,10 @@ impl OwnedRoundRect {
                 set_round_rect_corner(native, position, x, y);
             }
         }
-        Ok(Self(native))
+        Ok(track_native_object(
+            NativeObjectKind::RoundRect,
+            Self(native),
+        ))
     }
 }
 
@@ -1499,6 +1720,7 @@ impl Drop for OwnedRoundRect {
     fn drop(&mut self) {
         // SAFETY: The round rectangle is uniquely owned by this value.
         unsafe { round_rect::OH_Drawing_RoundRectDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::RoundRect);
     }
 }
 
@@ -1527,7 +1749,7 @@ impl OwnedPen {
                 pen::OH_Drawing_PenSetPathEffect(native.as_ptr(), path_effect.native.as_ptr());
             }
         }
-        Ok(Self(native))
+        Ok(track_native_object(NativeObjectKind::Pen, Self(native)))
     }
 }
 
@@ -1535,6 +1757,7 @@ impl Drop for OwnedPen {
     fn drop(&mut self) {
         // SAFETY: The pen is uniquely owned by this value.
         unsafe { pen::OH_Drawing_PenDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::Pen);
     }
 }
 
@@ -1551,10 +1774,13 @@ impl OwnedPathEffect {
             path_effect::OH_Drawing_CreateDashPathEffect(intervals.as_mut_ptr(), 2, 0.0)
         })
         .ok_or_else(|| anyhow!("OH_Drawing_CreateDashPathEffect returned null"))?;
-        Ok(Self {
-            native,
-            _intervals: intervals,
-        })
+        Ok(track_native_object(
+            NativeObjectKind::PathEffect,
+            Self {
+                native,
+                _intervals: intervals,
+            },
+        ))
     }
 }
 
@@ -1562,6 +1788,7 @@ impl Drop for OwnedPathEffect {
     fn drop(&mut self) {
         // SAFETY: The path effect is uniquely owned by this value.
         unsafe { path_effect::OH_Drawing_PathEffectDestroy(self.native.as_ptr()) };
+        release_native_object(NativeObjectKind::PathEffect);
     }
 }
 
@@ -1571,7 +1798,7 @@ impl OwnedPath {
     fn new() -> Result<Self> {
         // SAFETY: Creates a new, independently owned path.
         NonNull::new(unsafe { path::OH_Drawing_PathCreate() })
-            .map(Self)
+            .map(|native| track_native_object(NativeObjectKind::Path, Self(native)))
             .ok_or_else(|| anyhow!("OH_Drawing_PathCreate returned null"))
     }
 
@@ -1727,6 +1954,7 @@ impl Drop for OwnedPath {
     fn drop(&mut self) {
         // SAFETY: The path is uniquely owned by this value.
         unsafe { path::OH_Drawing_PathDestroy(self.0.as_ptr()) };
+        release_native_object(NativeObjectKind::Path);
     }
 }
 
@@ -1855,6 +2083,81 @@ fn draw_brush_in_path(
         canvas::OH_Drawing_CanvasDrawPath(native_canvas.as_ptr(), native_path.0.as_ptr());
         canvas::OH_Drawing_CanvasDetachBrush(native_canvas.as_ptr());
         canvas::OH_Drawing_CanvasRestore(native_canvas.as_ptr());
+    }
+}
+
+fn gradient_samples(color_space: ColorSpace, stops: [LinearColorStop; 2]) -> (Vec<u32>, Vec<f32>) {
+    if color_space == ColorSpace::Srgb
+        || (stops[1].percentage - stops[0].percentage).abs() <= f32::EPSILON
+    {
+        return (
+            stops.iter().map(|stop| argb(stop.color.to_rgb())).collect(),
+            stops.iter().map(|stop| stop.percentage).collect(),
+        );
+    }
+
+    // Native Drawing interpolates shader stops in sRGB. A dense Oklab stop
+    // table preserves GPUI's requested interpolation while retaining native
+    // clipping and path rasterization. 257 samples bound each native sRGB
+    // segment to less than one 8-bit color step for normal UI gradients.
+    const SAMPLE_COUNT: usize = 257;
+    let from = rgba_to_oklab(stops[0].color.to_rgb());
+    let to = rgba_to_oklab(stops[1].color.to_rgb());
+    let mut colors = Vec::with_capacity(SAMPLE_COUNT);
+    let mut positions = Vec::with_capacity(SAMPLE_COUNT);
+    for index in 0..SAMPLE_COUNT {
+        let t = index as f32 / (SAMPLE_COUNT - 1) as f32;
+        colors.push(argb(oklab_to_rgba([
+            from[0] + (to[0] - from[0]) * t,
+            from[1] + (to[1] - from[1]) * t,
+            from[2] + (to[2] - from[2]) * t,
+            from[3] + (to[3] - from[3]) * t,
+        ])));
+        positions.push(stops[0].percentage + (stops[1].percentage - stops[0].percentage) * t);
+    }
+    (colors, positions)
+}
+
+fn rgba_to_oklab(color: Rgba) -> [f32; 4] {
+    let red = srgb_to_linear(color.r);
+    let green = srgb_to_linear(color.g);
+    let blue = srgb_to_linear(color.b);
+    let l = (0.412_221_46 * red + 0.536_332_55 * green + 0.051_445_995 * blue).cbrt();
+    let m = (0.211_903_5 * red + 0.680_699_5 * green + 0.107_396_96 * blue).cbrt();
+    let s = (0.088_302_46 * red + 0.281_718_85 * green + 0.629_978_7 * blue).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+        color.a,
+    ]
+}
+
+fn oklab_to_rgba(color: [f32; 4]) -> Rgba {
+    let l = (color[0] + 0.396_337_78 * color[1] + 0.215_803_76 * color[2]).powi(3);
+    let m = (color[0] - 0.105_561_346 * color[1] - 0.063_854_17 * color[2]).powi(3);
+    let s = (color[0] - 0.089_484_18 * color[1] - 1.291_485_5 * color[2]).powi(3);
+    Rgba {
+        r: linear_to_srgb(4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s),
+        g: linear_to_srgb(-1.268_438 * l + 2.609_757_4 * m - 0.341_319_4 * s),
+        b: linear_to_srgb(-0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s),
+        a: color[3],
+    }
+}
+
+fn srgb_to_linear(component: f32) -> f32 {
+    if component <= 0.04045 {
+        component / 12.92
+    } else {
+        ((component + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(component: f32) -> f32 {
+    if component <= 0.003_130_8 {
+        component * 12.92
+    } else {
+        1.055 * component.powf(1.0 / 2.4) - 0.055
     }
 }
 

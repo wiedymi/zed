@@ -1,18 +1,32 @@
+#[path = "zed/app_menus.rs"]
 mod app_menus;
+#[path = "zed/edit_prediction_registry.rs"]
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
+#[path = "zed/mac_only_instance.rs"]
 pub(crate) mod mac_only_instance;
+#[path = "zed/migrate.rs"]
 mod migrate;
 #[cfg(target_os = "macos")]
+#[path = "zed/move_to_applications.rs"]
 pub(crate) mod move_to_applications;
+#[cfg(feature = "desktop")]
+#[path = "zed/open_listener.rs"]
 mod open_listener;
+#[cfg(feature = "desktop")]
+#[path = "zed/open_url_modal.rs"]
 mod open_url_modal;
+#[path = "zed/quick_action_bar.rs"]
 mod quick_action_bar;
+#[path = "zed/remote_debug.rs"]
 pub mod remote_debug;
+#[path = "zed/telemetry_log.rs"]
 pub mod telemetry_log;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+#[path = "zed/visual_tests.rs"]
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
+#[path = "zed/windows_only_instance.rs"]
 pub(crate) mod windows_only_instance;
 
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
@@ -54,6 +68,7 @@ use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
 use migrator::migrate_keymap;
 use onboarding::multibuffer_hint::MultibufferHint;
+#[cfg(feature = "desktop")]
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
 use paths::{
@@ -94,27 +109,39 @@ use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
 use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 
+use workspace::Pane;
 use workspace::{
-    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Toast, Workspace,
-    WorkspaceSettings, create_and_open_local_file,
-    notifications::simple_message_notification::MessageNotification, open_new,
+    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Workspace, WorkspaceSettings,
+    create_and_open_local_file, notifications::simple_message_notification::MessageNotification,
+    open_new,
 };
 use workspace::{
     CloseIntent, CloseProject, CloseWindow, RestoreBanner, with_active_or_new_workspace,
 };
-use workspace::{Pane, notifications::DetachAndPromptErr};
+#[cfg(feature = "desktop")]
+use workspace::{Toast, notifications::DetachAndPromptErr};
+#[cfg(feature = "desktop")]
+use zed_actions::OpenZedUrl;
 use zed_actions::{
     About, GetMerch, OpenAccountSettings, OpenBrowser, OpenDocs, OpenProjectTasks,
-    OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
+    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit,
 };
 
 const DOCS_URL: &str = "https://zed.dev/docs/";
 const STATUS_URL: &str = "https://status.zed.dev";
 const MERCH_URL: &str = "https://merch.zed.dev/";
 
+#[cfg(feature = "desktop")]
 pub struct CrashHandler(pub Arc<crashes::Client>);
 
+#[cfg(feature = "desktop")]
 impl gpui::Global for CrashHandler {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductPlatform {
+    Desktop,
+    Ohos,
+}
 
 actions!(
     zed,
@@ -188,7 +215,7 @@ actions!(
     ]
 );
 
-pub fn init(cx: &mut App) {
+pub fn init(stdout_is_a_pty: bool, cx: &mut App) {
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &Hide, cx| cx.hide());
     #[cfg(target_os = "macos")]
@@ -222,7 +249,7 @@ pub fn init(cx: &mut App) {
     // When Zed logs to stdout rather than the log file, avoid registering
     // handlers for both `OpenLog` and `RevealLogInFileManager`, as the log file
     // does not exist in that scenario and these actions would error.
-    if !crate::stdout_is_a_pty() {
+    if !stdout_is_a_pty {
         cx.on_action(|_: &OpenLog, cx| {
             with_active_or_new_workspace(cx, |workspace, window, cx| {
                 open_log_file(workspace, window, cx);
@@ -373,7 +400,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
 
     let use_system_window_tabs = WorkspaceSettings::get_global(cx).use_system_window_tabs;
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "freebsd"
+    ))]
     static APP_ICON: std::sync::LazyLock<Option<std::sync::Arc<image::RgbaImage>>> =
         std::sync::LazyLock::new(|| {
             // this shouldn't fail since decode is checked in build.rs
@@ -408,7 +438,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         display_id: display.map(|display| display.id()),
         window_background: cx.theme().window_background_appearance(),
         app_id: Some(app_id.to_owned()),
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(
+            all(target_os = "linux", not(target_env = "ohos")),
+            target_os = "freebsd"
+        ))]
         icon: APP_ICON.as_ref().cloned(),
         window_decorations: Some(window_decorations),
         window_min_size: Some(gpui::Size {
@@ -424,7 +457,11 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
     }
 }
 
-pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+pub fn initialize_workspace(
+    app_state: Arc<AppState>,
+    product_platform: ProductPlatform,
+    cx: &mut App,
+) {
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -574,6 +611,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         if let Some(specs) = window.gpu_specs() {
             log::info!("Using GPU: {:?}", specs);
             show_software_emulation_warning_if_needed(specs.clone(), window, cx);
+            #[cfg(feature = "desktop")]
             if let Some(crash_client) = cx.try_global::<CrashHandler>() {
                 crashes::set_gpu_info(&crash_client.0, specs);
             }
@@ -648,9 +686,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_right_item(image_info, window, cx);
         });
 
-        let panels_task = initialize_panels(window, cx);
+        let panels_task = initialize_panels(product_platform, window, cx);
         workspace.set_panels_task(panels_task);
-        register_actions(app_state.clone(), workspace, window, cx);
+        register_actions(app_state.clone(), product_platform, workspace, window, cx);
 
         if !workspace.has_active_modal(window, cx) {
             workspace.focus_handle(cx).focus(window, cx);
@@ -771,14 +809,16 @@ fn show_software_emulation_warning_if_needed(
     }
 }
 
-fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<anyhow::Result<()>> {
+fn initialize_panels(
+    product_platform: ProductPlatform,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Task<anyhow::Result<()>> {
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let channels_panel =
-            collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -801,10 +841,21 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
+            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
+
+        #[cfg(feature = "desktop")]
+        if product_platform == ProductPlatform::Desktop {
+            let channels_panel = collab_ui::collab_panel::CollabPanel::load(
+                workspace_handle.clone(),
+                cx.clone(),
+            );
+            add_panel_when_ready(channels_panel, workspace_handle, cx).await;
+        }
+
+        #[cfg(not(feature = "desktop"))]
+        let _ = product_platform;
 
         anyhow::Ok(())
     })
@@ -906,10 +957,41 @@ async fn initialize_agent_panel(
 
 fn register_actions(
     app_state: Arc<AppState>,
+    product_platform: ProductPlatform,
     workspace: &mut Workspace,
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    #[cfg(feature = "desktop")]
+    if product_platform == ProductPlatform::Desktop {
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &collab_ui::collab_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
+            },
+        );
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    let _ = product_platform;
+
+    #[cfg(feature = "desktop")]
+    workspace.register_action(|_, action: &OpenZedUrl, _, cx| {
+        OpenListener::global(cx).open(RawOpenRequest {
+            urls: vec![String::from(&*action.url)],
+            ..Default::default()
+        })
+    });
+
+    #[cfg(feature = "desktop")]
+    workspace.register_action(|workspace, _: &OpenUrlPrompt, window, cx| {
+        workspace.toggle_modal(window, cx, |window, cx| {
+            open_url_modal::OpenUrlModal::new(window, cx)
+        });
+    });
+
     workspace
         .register_action(|_, _: &OpenDocs, _, cx| cx.open_url(DOCS_URL))
         .register_action(|_, _: &OpenStatusPage, _, cx| cx.open_url(STATUS_URL))
@@ -1022,17 +1104,6 @@ fn register_actions(
         })
         .register_action(|_, _: &ToggleFullScreen, window, _| {
             window.toggle_fullscreen();
-        })
-        .register_action(|_, action: &OpenZedUrl, _, cx| {
-            OpenListener::global(cx).open(RawOpenRequest {
-                urls: vec![String::from(&*action.url)],
-                ..Default::default()
-            })
-        })
-        .register_action(|workspace, _: &OpenUrlPrompt, window, cx| {
-            workspace.toggle_modal(window, cx, |window, cx| {
-                open_url_modal::OpenUrlModal::new(window, cx)
-            });
         })
         .register_action(|workspace, action: &OpenBrowser, _window, cx| {
             // Parse and validate the URL to ensure it's properly formatted
@@ -1245,32 +1316,6 @@ fn register_actions(
                 }
             }
         })
-        .register_action(|_, _: &install_cli::RegisterZedScheme, window, cx| {
-            cx.spawn_in(window, async move |workspace, cx| {
-                install_cli::register_zed_scheme(cx).await?;
-                workspace.update_in(cx, |workspace, _, cx| {
-                    struct RegisterZedScheme;
-
-                    workspace.show_toast(
-                        Toast::new(
-                            NotificationId::unique::<RegisterZedScheme>(),
-                            format!(
-                                "zed:// links will now open in {}.",
-                                ReleaseChannel::global(cx).display_name()
-                            ),
-                        ),
-                        cx,
-                    )
-                })?;
-                Ok(())
-            })
-            .detach_and_prompt_err(
-                "Error registering zed:// scheme",
-                window,
-                cx,
-                |_, _, _| None,
-            );
-        })
         .register_action(open_project_settings_file)
         .register_action(open_project_tasks_file)
         .register_action(open_worktree_setup_tasks_file)
@@ -1289,14 +1334,6 @@ fn register_actions(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<OutlinePanel>(window, cx);
-            },
-        )
-        .register_action(
-            |workspace: &mut Workspace,
-             _: &collab_ui::collab_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
             },
         )
         .register_action(
@@ -1367,7 +1404,35 @@ fn register_actions(
             }
         });
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(feature = "desktop")]
+    workspace.register_action(|_, _: &install_cli::RegisterZedScheme, window, cx| {
+        cx.spawn_in(window, async move |workspace, cx| {
+            install_cli::register_zed_scheme(cx).await?;
+            workspace.update_in(cx, |workspace, _, cx| {
+                struct RegisterZedScheme;
+
+                workspace.show_toast(
+                    Toast::new(
+                        NotificationId::unique::<RegisterZedScheme>(),
+                        format!(
+                            "zed:// links will now open in {}.",
+                            ReleaseChannel::global(cx).display_name()
+                        ),
+                    ),
+                    cx,
+                )
+            })?;
+            Ok(())
+        })
+        .detach_and_prompt_err(
+            "Error registering zed:// scheme",
+            window,
+            cx,
+            |_, _, _| None,
+        );
+    });
+
+    #[cfg(all(feature = "desktop", not(target_os = "windows")))]
     workspace.register_action(install_cli);
 
     if workspace.project().read(cx).is_via_remote_server() {
@@ -1728,6 +1793,7 @@ fn open_about_window(cx: &mut App) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[cfg(feature = "desktop")]
 fn install_cli(
     _: &mut Workspace,
     _: &install_cli::InstallCliBinary,
@@ -2762,7 +2828,7 @@ fn open_settings_file(
 ///
 /// This fast path exists to load these themes as soon as possible so the user
 /// doesn't see the default themes while waiting on extensions to load.
-pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut App) {
+pub fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut App) {
     let extension_store = ExtensionStore::global(cx);
     let theme_registry = ThemeRegistry::global(cx);
     let theme_settings = ThemeSettings::get_global(cx);
@@ -6065,7 +6131,7 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
-            initialize_workspace(app_state.clone(), cx);
+            initialize_workspace(app_state.clone(), ProductPlatform::Desktop, cx);
             search::init(cx);
             lsp_locations::init(cx);
             cx.set_global(workspace::PaneSearchBarCallbacks {

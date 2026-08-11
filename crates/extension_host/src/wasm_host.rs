@@ -442,19 +442,31 @@ impl extension::Extension for WasmExtension {
         user_installed_path: Option<PathBuf>,
         worktree: Arc<dyn WorktreeDelegate>,
     ) -> Result<DebugAdapterBinary> {
-        self.call(|extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                let dap_binary = extension
-                    .call_get_dap_binary(store, dap_name, config, user_installed_path, resource)
-                    .await?
-                    .map_err(|err| store.data().extension_error(err))?;
-                let dap_binary = dap_binary.try_into()?;
-                Ok(dap_binary)
-            }
-            .boxed()
-        })
-        .await?
+        let binary = self
+            .call(|extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    let dap_binary = extension
+                        .call_get_dap_binary(store, dap_name, config, user_installed_path, resource)
+                        .await?
+                        .map_err(|err| store.data().extension_error(err))?;
+                    let dap_binary: DebugAdapterBinary = dap_binary.try_into()?;
+                    Ok::<DebugAdapterBinary, anyhow::Error>(dap_binary)
+                }
+                .boxed()
+            })
+            .await??;
+
+        if binary
+            .command
+            .as_deref()
+            .map(Path::new)
+            .is_some_and(|path| path.is_absolute() && path.starts_with(self.work_dir.as_ref()))
+        {
+            util::command::ExecutableOrigin::NativeDownload.ensure_supported()?;
+        }
+
+        Ok(binary)
     }
     async fn dap_request_kind(
         &self,

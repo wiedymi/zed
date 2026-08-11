@@ -12,18 +12,19 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use futures::channel::oneshot;
+use gpui::accesskit;
 use gpui::{
-    Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, Bounds, Capslock,
-    ClipboardItem, CursorStyle, DispatchEventResult, DisplayId, DummyKeyboardMapper, ExternalPaths,
-    FileDropEvent, ForegroundExecutor, GpuSpecs, KeyDownEvent, KeyUpEvent, Keymap, Keystroke, Menu,
-    MenuItem, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, OwnedMenu, PathPromptOptions, Pixels, Platform,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, Scene, ScrollDelta, ScrollWheelEvent, Size, SystemNotification,
-    SystemNotificationResponse, Task, ThermalState, TouchEvent, TouchId, TouchPhase,
-    UTF16Selection, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowParams, point, px,
+    A11yCallbacks, Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, Bounds,
+    Capslock, ClipboardItem, CursorStyle, DispatchEventResult, DisplayId, DummyKeyboardMapper,
+    ExternalDragPayload, ExternalPaths, FileDropEvent, ForegroundExecutor, GpuSpecs, KeyDownEvent,
+    KeyUpEvent, Keymap, Keystroke, Menu, MenuItem, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, OwnedMenu,
+    PathPromptOptions, Pixels, Platform, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, ScrollDelta,
+    ScrollWheelEvent, Size, SystemNotification, SystemNotificationResponse, Task, ThermalState,
+    TouchEvent, TouchId, TouchPhase, UTF16Selection, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowParams, point, px,
 };
 use gpui_text::CosmicTextSystem;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -32,6 +33,7 @@ use uuid::Uuid;
 use crate::{
     LogLevel, NativeEvent, NativeMouseEvent, NativeScrollEvent, NativeSurfaceEvent,
     NativeTouchEvent, XComponentHandle,
+    accessibility::Adapter as AccessibilityAdapter,
     atlas::OhosAtlas,
     current_xcomponent,
     dispatcher::OhosDispatcher,
@@ -39,11 +41,12 @@ use crate::{
     log_message,
     xcomponent::{
         apply_pending_surface_resize, clear_event_handler, set_event_handler, with_surface,
-        xcomponent_by_id,
+        xcomponent_by_id, xcomponent_id,
     },
 };
 
 thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
     static CURRENT_PLATFORM: RefCell<Option<Rc<OhosPlatform>>> = const { RefCell::new(None) };
 }
 
@@ -88,6 +91,7 @@ pub fn configure_frame_scheduler(
     callback: Arc<dyn Fn() -> Result<()> + Send + Sync>,
     open_external_url: Arc<dyn Fn(String) -> Result<()> + Send + Sync>,
     open_external_path: Arc<dyn Fn(String, bool) -> Result<()> + Send + Sync>,
+    start_outbound_drag: Arc<dyn Fn(u32, Vec<String>, Vec<bool>) -> Result<()> + Send + Sync>,
     set_cursor: Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>,
     control_window: Arc<dyn Fn(u32, u32, String, i32, i32, u32, u32) -> Result<()> + Send + Sync>,
     control_application: Arc<dyn Fn(u32) -> Result<()> + Send + Sync>,
@@ -118,6 +122,7 @@ pub fn configure_frame_scheduler(
             callback,
             open_external_url,
             open_external_path,
+            start_outbound_drag,
             set_cursor,
             control_window,
             control_application,
@@ -199,6 +204,65 @@ pub fn handle_memory_warning() {
             return;
         };
         platform.handle_memory_warning();
+    });
+}
+
+pub fn set_system_appearance(color_mode: i32) -> Result<()> {
+    let appearance = match color_mode {
+        -1 => return Ok(()),
+        0 => WindowAppearance::Dark,
+        1 => WindowAppearance::Light,
+        _ => bail!("ArkUI supplied an invalid color mode {color_mode}"),
+    };
+    CURRENT_PLATFORM.with_borrow(|current| {
+        let platform = current
+            .as_ref()
+            .context("appearance changed before GPUI initialized")?;
+        platform.handle_system_appearance(appearance);
+        Ok(())
+    })
+}
+
+pub fn set_thermal_level(level: u32) -> Result<()> {
+    let thermal_state = match level {
+        0 | 1 => ThermalState::Nominal,
+        2 => ThermalState::Fair,
+        3 | 4 => ThermalState::Serious,
+        5..=7 => ThermalState::Critical,
+        _ => bail!("ArkUI supplied an invalid thermal level {level}"),
+    };
+    CURRENT_PLATFORM.with_borrow(|current| {
+        let platform = current
+            .as_ref()
+            .context("thermal state changed before GPUI initialized")?;
+        platform.handle_thermal_state(thermal_state);
+        Ok(())
+    })
+}
+
+pub fn set_accessibility_enabled(enabled: bool) -> Result<()> {
+    CURRENT_PLATFORM.with_borrow(|current| {
+        let platform = current
+            .as_ref()
+            .context("accessibility state changed before GPUI initialized")?;
+        platform.handle_accessibility_state(enabled);
+        Ok(())
+    })
+}
+
+pub fn handle_open_urls(urls: Vec<String>) {
+    if urls.is_empty() {
+        return;
+    }
+    CURRENT_PLATFORM.with_borrow(|current| {
+        let Some(platform) = current.as_ref() else {
+            log_message(
+                LogLevel::Error,
+                "incoming URLs arrived before GPUI initialized",
+            );
+            return;
+        };
+        platform.handle_open_urls(urls);
     });
 }
 
@@ -317,6 +381,8 @@ struct PlatformCallbacks {
     system_wake: Option<Box<dyn FnMut()>>,
     lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
     memory_warning: Option<Box<dyn FnMut()>>,
+    open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
+    thermal_state_change: Option<Box<dyn FnMut()>>,
     app_menu_action: Option<Box<dyn FnMut(&dyn Action)>>,
     will_open_app_menu: Option<Box<dyn FnMut()>>,
     validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
@@ -340,6 +406,7 @@ struct ArkUiKeyEvent {
 type WindowControlCallback =
     Arc<dyn Fn(u32, u32, String, i32, i32, u32, u32) -> Result<()> + Send + Sync>;
 type ApplicationControlCallback = Arc<dyn Fn(u32) -> Result<()> + Send + Sync>;
+type OutboundDragCallback = Arc<dyn Fn(u32, Vec<String>, Vec<bool>) -> Result<()> + Send + Sync>;
 
 const WINDOW_COMMAND_OPEN: u32 = 0;
 const WINDOW_COMMAND_CLOSE: u32 = 1;
@@ -362,11 +429,15 @@ struct OhosPlatform {
     text_system: Arc<dyn PlatformTextSystem>,
     display: Rc<OhosDisplay>,
     scale_factor: Cell<f32>,
+    appearance: Cell<WindowAppearance>,
+    thermal_state: Cell<ThermalState>,
+    accessibility_enabled: Cell<bool>,
     windows: RefCell<Vec<Rc<RefCell<WindowState>>>>,
     ime: RefCell<Option<NativeIme>>,
     menus: RefCell<Vec<OwnedMenu>>,
     open_external_url: RefCell<Option<Arc<dyn Fn(String) -> Result<()> + Send + Sync>>>,
     open_external_path: RefCell<Option<Arc<dyn Fn(String, bool) -> Result<()> + Send + Sync>>>,
+    start_outbound_drag: RefCell<Option<OutboundDragCallback>>,
     set_cursor: RefCell<Option<Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>>>,
     control_window: RefCell<Option<WindowControlCallback>>,
     control_application: RefCell<Option<ApplicationControlCallback>>,
@@ -433,11 +504,15 @@ impl OhosPlatform {
             text_system: Arc::new(text_system),
             display: Rc::new(OhosDisplay::default()),
             scale_factor: Cell::new(1.0),
+            appearance: Cell::new(WindowAppearance::Light),
+            thermal_state: Cell::new(ThermalState::Nominal),
+            accessibility_enabled: Cell::new(false),
             windows: RefCell::new(Vec::new()),
             ime: RefCell::new(None),
             menus: RefCell::new(Vec::new()),
             open_external_url: RefCell::new(None),
             open_external_path: RefCell::new(None),
+            start_outbound_drag: RefCell::new(None),
             set_cursor: RefCell::new(None),
             control_window: RefCell::new(None),
             control_application: RefCell::new(None),
@@ -524,6 +599,71 @@ impl OhosPlatform {
         }
     }
 
+    fn handle_system_appearance(&self, appearance: WindowAppearance) {
+        if self.appearance.replace(appearance) == appearance {
+            return;
+        }
+
+        for window in self.windows.borrow().clone() {
+            let mut callback = window.borrow_mut().callbacks.appearance_changed.take();
+            if let Some(callback) = callback.as_mut() {
+                callback();
+            }
+            if let Some(callback) = callback {
+                window.borrow_mut().callbacks.appearance_changed = Some(callback);
+            }
+        }
+        self.request_frame();
+    }
+
+    fn handle_thermal_state(&self, thermal_state: ThermalState) {
+        if self.thermal_state.replace(thermal_state) == thermal_state {
+            return;
+        }
+
+        let mut callback = self.callbacks.borrow_mut().thermal_state_change.take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        if let Some(callback) = callback {
+            self.callbacks.borrow_mut().thermal_state_change = Some(callback);
+        }
+    }
+
+    fn handle_accessibility_state(&self, enabled: bool) {
+        if self.accessibility_enabled.replace(enabled) == enabled {
+            return;
+        }
+        for window in self.windows.borrow().clone() {
+            let state = window.borrow();
+            let Some(adapter) = state.accessibility.as_ref() else {
+                continue;
+            };
+            if let Err(error) = adapter.set_active(enabled) {
+                log_message(
+                    LogLevel::Error,
+                    format!("failed to change HarmonyOS accessibility state: {error:#}"),
+                );
+            }
+        }
+        self.request_frame();
+    }
+
+    fn handle_open_urls(&self, urls: Vec<String>) {
+        let mut callback = self.callbacks.borrow_mut().open_urls.take();
+        if let Some(callback) = callback.as_mut() {
+            callback(urls);
+        } else {
+            log_message(
+                LogLevel::Warning,
+                "incoming URLs arrived before Zed installed its URL handler",
+            );
+        }
+        if let Some(callback) = callback {
+            self.callbacks.borrow_mut().open_urls = Some(callback);
+        }
+    }
+
     fn handle_frame(&self) {
         self.dispatcher.begin_frame();
         self.dispatcher.drain_main_queue();
@@ -578,6 +718,7 @@ impl OhosPlatform {
         callback: Arc<dyn Fn() -> Result<()> + Send + Sync>,
         open_external_url: Arc<dyn Fn(String) -> Result<()> + Send + Sync>,
         open_external_path: Arc<dyn Fn(String, bool) -> Result<()> + Send + Sync>,
+        start_outbound_drag: OutboundDragCallback,
         set_cursor: Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>,
         control_window: WindowControlCallback,
         control_application: ApplicationControlCallback,
@@ -601,6 +742,7 @@ impl OhosPlatform {
         self.dispatcher.install_wake_callback(callback);
         self.open_external_url.replace(Some(open_external_url));
         self.open_external_path.replace(Some(open_external_path));
+        self.start_outbound_drag.replace(Some(start_outbound_drag));
         self.set_cursor.replace(Some(set_cursor));
         self.control_window.replace(Some(control_window));
         self.control_application.replace(Some(control_application));
@@ -1029,6 +1171,16 @@ impl OhosPlatform {
             window.borrow_mut().component = None;
             return Err(error);
         }
+        let pending_accessibility = window.borrow_mut().accessibility_callbacks.take();
+        if let Some(callbacks) = pending_accessibility {
+            match create_accessibility_adapter(window, callbacks) {
+                Ok(adapter) => window.borrow_mut().accessibility = Some(adapter),
+                Err(error) => log_message(
+                    LogLevel::Error,
+                    format!("failed to attach HarmonyOS accessibility: {error:#}"),
+                ),
+            }
+        }
         window.borrow_mut().frame_requested = true;
         self.request_frame();
         Ok(())
@@ -1349,6 +1501,8 @@ impl Platform for OhosPlatform {
             background: WindowBackgroundAppearance::Opaque,
             callbacks: WindowCallbacks::default(),
             atlas,
+            accessibility_callbacks: None,
+            accessibility: None,
         }));
         if !primary {
             for window in self.windows.borrow().iter() {
@@ -1385,7 +1539,7 @@ impl Platform for OhosPlatform {
     }
 
     fn window_appearance(&self) -> WindowAppearance {
-        WindowAppearance::Dark
+        self.appearance.get()
     }
 
     fn open_url(&self, url: &str) {
@@ -1404,10 +1558,14 @@ impl Platform for OhosPlatform {
         }
     }
 
-    fn on_open_urls(&self, _callback: Box<dyn FnMut(Vec<String>)>) {}
+    fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
+        self.callbacks.borrow_mut().open_urls = Some(callback);
+    }
 
-    fn register_url_scheme(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Ok(()))
+    fn register_url_scheme(&self, url: &str) -> Task<Result<()>> {
+        Task::ready(Err(anyhow::anyhow!(
+            "HarmonyOS URL scheme {url:?} must be declared in module.json5 before installation"
+        )))
     }
 
     fn prompt_for_paths(
@@ -1621,9 +1779,11 @@ impl Platform for OhosPlatform {
     }
 
     fn thermal_state(&self) -> ThermalState {
-        ThermalState::Nominal
+        self.thermal_state.get()
     }
-    fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+    fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
+        self.callbacks.borrow_mut().thermal_state_change = Some(callback);
+    }
 
     fn app_path(&self) -> Result<PathBuf> {
         std::env::current_exe().context("failed to obtain HarmonyOS application path")
@@ -1788,6 +1948,8 @@ struct WindowState {
     background: WindowBackgroundAppearance,
     callbacks: WindowCallbacks,
     atlas: Arc<OhosAtlas>,
+    accessibility_callbacks: Option<A11yCallbacks>,
+    accessibility: Option<AccessibilityAdapter>,
 }
 
 struct OhosWindow(Rc<RefCell<WindowState>>);
@@ -1895,7 +2057,13 @@ impl PlatformWindow for OhosWindow {
         self.0.borrow().scale_factor
     }
     fn appearance(&self) -> WindowAppearance {
-        WindowAppearance::Dark
+        CURRENT_PLATFORM.with_borrow(|current| {
+            current
+                .as_ref()
+                .map_or(WindowAppearance::Light, |platform| {
+                    platform.appearance.get()
+                })
+        })
     }
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
         CURRENT_PLATFORM.with_borrow(|current| {
@@ -1931,6 +2099,58 @@ impl PlatformWindow for OhosWindow {
                 .as_ref()
                 .and_then(|platform| platform.request_prompt(level, message, detail, answers))
         })
+    }
+    fn can_start_external_drag(&self) -> bool {
+        CURRENT_PLATFORM.with_borrow(|current| {
+            current
+                .as_ref()
+                .is_some_and(|platform| platform.start_outbound_drag.borrow().is_some())
+        })
+    }
+    fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
+        let ExternalDragPayload::Files(files) = payload;
+        if files.entries().is_empty() {
+            return false;
+        }
+
+        let mut paths = Vec::with_capacity(files.entries().len());
+        let mut directories = Vec::with_capacity(files.entries().len());
+        for (path, is_directory) in files.entries() {
+            let Some(path) = path.to_str() else {
+                log_message(
+                    LogLevel::Error,
+                    format!(
+                        "cannot start a HarmonyOS file drag for a non-UTF-8 path: {}",
+                        path.display()
+                    ),
+                );
+                return false;
+            };
+            paths.push(path.to_owned());
+            directories.push(*is_directory);
+        }
+
+        let window_id = self.0.borrow().native_window_id;
+        let result = CURRENT_PLATFORM.with_borrow(|current| {
+            let platform = current
+                .as_ref()
+                .context("GPUI platform is unavailable while starting a file drag")?;
+            let callback = platform
+                .start_outbound_drag
+                .borrow()
+                .as_ref()
+                .cloned()
+                .context("HarmonyOS outbound-drag bridge is not configured")?;
+            callback(window_id, paths, directories)
+        });
+        if let Err(error) = result {
+            log_message(
+                LogLevel::Error,
+                format!("failed to start a HarmonyOS file drag: {error:#}"),
+            );
+            return false;
+        }
+        true
     }
     fn activate(&self) {
         CURRENT_PLATFORM.with_borrow(|current| {
@@ -2056,6 +2276,68 @@ impl PlatformWindow for OhosWindow {
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         self.0.borrow_mut().ime_candidate_bounds = Some(bounds);
     }
+
+    fn a11y_init(&self, callbacks: A11yCallbacks) {
+        if self.0.borrow().component.is_none() {
+            self.0.borrow_mut().accessibility_callbacks = Some(callbacks);
+            return;
+        }
+        match create_accessibility_adapter(&self.0, callbacks) {
+            Ok(adapter) => self.0.borrow_mut().accessibility = Some(adapter),
+            Err(error) => log_message(
+                LogLevel::Error,
+                format!("failed to initialize HarmonyOS accessibility: {error:#}"),
+            ),
+        }
+    }
+
+    fn a11y_tree_update(&self, update: accesskit::TreeUpdate) {
+        let state = self.0.borrow();
+        let Some(adapter) = state.accessibility.as_ref() else {
+            return;
+        };
+        if let Err(error) = adapter.update(update) {
+            log_message(
+                LogLevel::Error,
+                format!("failed to update HarmonyOS accessibility: {error:#}"),
+            );
+        }
+    }
+
+    fn a11y_update_window_bounds(&self) {
+        let state = self.0.borrow();
+        if let Some(adapter) = state.accessibility.as_ref() {
+            adapter.update_geometry(state.scale_factor, state.screen_origin);
+        }
+    }
+}
+
+fn create_accessibility_adapter(
+    window: &Rc<RefCell<WindowState>>,
+    callbacks: A11yCallbacks,
+) -> Result<AccessibilityAdapter> {
+    let (component, scale_factor, screen_origin) = {
+        let state = window.borrow();
+        (
+            state.component.context("XComponent is not attached")?,
+            state.scale_factor,
+            state.screen_origin,
+        )
+    };
+    let instance_id = xcomponent_id(component.native())?;
+    let active = CURRENT_PLATFORM.with_borrow(|current| {
+        current
+            .as_ref()
+            .is_some_and(|platform| platform.accessibility_enabled.get())
+    });
+    AccessibilityAdapter::new(
+        component,
+        &instance_id,
+        callbacks,
+        scale_factor,
+        screen_origin,
+        active,
+    )
 }
 
 fn request_window_frame(window: &Weak<RefCell<WindowState>>) {

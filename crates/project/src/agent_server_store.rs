@@ -1175,6 +1175,12 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
             let dir = installation_dir;
             fs.create_dir(&dir).await?;
 
+            if cfg!(target_env = "ohos") {
+                anyhow::bail!(
+                    "The agent server registry does not contain HarmonyOS executables. Configure an HNP executable or use a remote agent server."
+                );
+            }
+
             let os = if cfg!(target_os = "macos") {
                 "darwin"
             } else if cfg!(target_os = "linux") {

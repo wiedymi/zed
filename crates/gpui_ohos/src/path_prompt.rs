@@ -66,6 +66,10 @@ pub fn activate_persistent_uri(uri: &str) -> Result<PathBuf> {
     resolve_uri(uri)
 }
 
+pub fn resolve_incoming_uri(uri: &str) -> Result<PathBuf> {
+    resolve_uri(uri)
+}
+
 fn persist_permissions(uris: &[String]) -> Result<()> {
     let (uri_strings, policies) = build_policies(uris)?;
     let _uri_strings = uri_strings;

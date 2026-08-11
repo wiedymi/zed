@@ -19,6 +19,7 @@ gpui.workspace = true
 gpui_text.workspace = true
 
 [target.'cfg(target_env = "ohos")'.dependencies]
+accesskit.workspace = true
 anyhow.workspace = true
 async-task.workspace = true
 etagere.workspace = true

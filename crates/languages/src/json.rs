@@ -442,6 +442,7 @@ impl LspInstaller for NodeVersionAdapter {
         _: bool,
         _: &mut AsyncApp,
     ) -> Result<GitHubLspBinaryVersion> {
+        util::command::ExecutableOrigin::NativeDownload.ensure_supported()?;
         let release = latest_github_release(
             "zed-industries/package-version-server",
             true,
@@ -496,6 +497,7 @@ impl LspInstaller for NodeVersionAdapter {
         let delegate = delegate.clone();
 
         async move {
+            util::command::ExecutableOrigin::NativeDownload.ensure_supported()?;
             let version = &latest_version;
             let destination_path = container_dir.join(format!(
                 "{}-{}{}",

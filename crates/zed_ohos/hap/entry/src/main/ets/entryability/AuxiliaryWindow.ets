@@ -152,18 +152,23 @@ async function createAuxiliaryWindow(
   if (!stage) {
     throw new Error('HarmonyOS window stage is not configured');
   }
-  const createdWindow = await stage.createSubWindowWithOptions(`zed-window-${windowId}`, {
-    title: title,
-    decorEnabled: true,
-    isModal: false,
-    maximizeSupported: true,
-    windowRect: {
-      left: left,
-      top: top,
-      width: width,
-      height: height
-    }
-  });
+  let createdWindow: window.Window;
+  try {
+    createdWindow = await stage.createSubWindowWithOptions(`zed-window-${windowId}`, {
+      title: title,
+      decorEnabled: true,
+      isModal: false,
+      maximizeSupported: true,
+      windowRect: {
+        left: left,
+        top: top,
+        width: width,
+        height: height
+      }
+    });
+  } catch (error) {
+    throw new Error(`Unable to allocate HarmonyOS window ${windowId}: ${JSON.stringify(error)}`);
+  }
   auxiliaryWindows.set(windowId, createdWindow);
   try {
     const storage = new LocalStorage(new AuxiliaryPageStorage(windowId));
@@ -196,7 +201,11 @@ async function resolveWindow(windowId: number): Promise<window.Window> {
   if (!stage) {
     throw new Error('HarmonyOS window stage is not configured');
   }
-  mainWindow = await stage.getMainWindow();
+  try {
+    mainWindow = await stage.getMainWindow();
+  } catch (error) {
+    throw new Error(`Unable to obtain the HarmonyOS main window: ${JSON.stringify(error)}`);
+  }
   return mainWindow;
 }
 
@@ -223,40 +232,50 @@ async function applyWindowCommand(
     }
     auxiliaryWindows.delete(windowId);
     stopObservingWindow(windowId, auxiliaryWindow);
-    await auxiliaryWindow.destroyWindow();
+    try {
+      await auxiliaryWindow.destroyWindow();
+    } catch (error) {
+      throw new Error(`Unable to close HarmonyOS window ${windowId}: ${JSON.stringify(error)}`);
+    }
     return;
   }
 
   const targetWindow = await resolveWindow(windowId);
-  switch (command) {
-    case WindowCommand.SHOW:
-      await targetWindow.showWindow();
-      break;
-    case WindowCommand.MINIMIZE:
-      await targetWindow.minimize();
-      break;
-    case WindowCommand.TOGGLE_MAXIMIZE:
-      if (targetWindow.getWindowStatus() === window.WindowStatusType.MAXIMIZE) {
-        await targetWindow.recover();
-      } else {
-        await targetWindow.maximize(window.MaximizePresentation.EXIT_IMMERSIVE);
-      }
-      break;
-    case WindowCommand.TOGGLE_FULLSCREEN:
-      if (targetWindow.getWindowStatus() === window.WindowStatusType.FULL_SCREEN) {
-        await targetWindow.recover();
-      } else {
-        await targetWindow.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
-      }
-      break;
-    case WindowCommand.RESIZE:
-      await targetWindow.resize(width, height);
-      break;
-    case WindowCommand.SET_TITLE:
-      await targetWindow.setWindowTitle(title);
-      break;
-    default:
-      throw new Error(`Unknown HarmonyOS window command ${command}`);
+  try {
+    switch (command) {
+      case WindowCommand.SHOW:
+        await targetWindow.showWindow();
+        break;
+      case WindowCommand.MINIMIZE:
+        await targetWindow.minimize();
+        break;
+      case WindowCommand.TOGGLE_MAXIMIZE:
+        if (targetWindow.getWindowStatus() === window.WindowStatusType.MAXIMIZE) {
+          await targetWindow.recover();
+        } else {
+          await targetWindow.maximize(window.MaximizePresentation.EXIT_IMMERSIVE);
+        }
+        break;
+      case WindowCommand.TOGGLE_FULLSCREEN:
+        if (targetWindow.getWindowStatus() === window.WindowStatusType.FULL_SCREEN) {
+          await targetWindow.recover();
+        } else {
+          await targetWindow.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
+        }
+        break;
+      case WindowCommand.RESIZE:
+        await targetWindow.resize(width, height);
+        break;
+      case WindowCommand.SET_TITLE:
+        await targetWindow.setWindowTitle(title);
+        break;
+      default:
+        throw new Error(`Unknown HarmonyOS window command ${command}`);
+    }
+  } catch (error) {
+    throw new Error(
+      `HarmonyOS window command ${command} failed for window ${windowId}: ${JSON.stringify(error)}`
+    );
   }
 }
 
