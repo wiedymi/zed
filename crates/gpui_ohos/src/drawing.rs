@@ -179,7 +179,7 @@ fn native_object_profile() -> String {
 }
 
 pub struct NativeDrawingSurface {
-    gpu_context: NonNull<OH_Drawing_GpuContext>,
+    gpu_context: Option<NonNull<OH_Drawing_GpuContext>>,
     surface: Option<NonNull<OH_Drawing_Surface>>,
     window: NonNull<c_void>,
     width: u32,
@@ -234,29 +234,10 @@ impl NativeDrawingSurface {
         let image_info = configure_native_window(window, width, height)?;
         let sampling = OwnedSamplingOptions::new()?;
 
-        // SAFETY: This creates a new, independently owned Native Drawing GPU
-        // context. Ownership is released in `Drop`.
-        let gpu_context = NonNull::new(unsafe { gpu_context::OH_Drawing_GpuContextCreate() })
-            .ok_or_else(|| anyhow!("OH_Drawing_GpuContextCreate returned null"))?;
-        // SAFETY: `gpu_context` and `window` are live for this call and
-        // `image_info` describes the XComponent surface dimensions.
-        let native_surface = unsafe {
-            surface::OH_Drawing_SurfaceCreateOnScreen(
-                gpu_context.as_ptr(),
-                image_info,
-                window.as_ptr(),
-            )
-        };
-        let Some(native_surface) = NonNull::new(native_surface) else {
-            // SAFETY: The context was created above and no surface retained it.
-            unsafe { gpu_context::OH_Drawing_GpuContextDestroy(gpu_context.as_ptr()) };
-            bail!("OH_Drawing_SurfaceCreateOnScreen returned null");
-        };
-        track_native_object(NativeObjectKind::GpuContext, ());
-        track_native_object(NativeObjectKind::Surface, ());
+        let (gpu_context, native_surface) = create_gpu_surface(window, image_info)?;
 
         Ok(Self {
-            gpu_context,
+            gpu_context: Some(gpu_context),
             surface: Some(native_surface),
             window,
             width,
@@ -274,6 +255,20 @@ impl NativeDrawingSurface {
             return Ok(());
         }
 
+        self.replace_surface(width, height)
+    }
+
+    /// Recreates all GPU resources after another native window was active.
+    pub fn rebind(&mut self) -> Result<()> {
+        self.destroy_gpu_surface();
+        let image_info = configure_native_window(self.window, self.width, self.height)?;
+        let (gpu_context, native_surface) = create_gpu_surface(self.window, image_info)?;
+        self.gpu_context = Some(gpu_context);
+        self.surface = Some(native_surface);
+        Ok(())
+    }
+
+    fn replace_surface(&mut self, width: u32, height: u32) -> Result<()> {
         if let Some(previous) = self.surface.take() {
             // Native Drawing's on-screen wrappers ultimately own the EGLSurface
             // associated with this NativeWindow. Two wrappers cannot overlap:
@@ -286,11 +281,14 @@ impl NativeDrawingSurface {
         }
 
         let image_info = configure_native_window(self.window, width, height)?;
+        let gpu_context = self
+            .gpu_context
+            .context("Native Drawing GPU context is unavailable")?;
         // SAFETY: The GPU context and NativeWindow remain live for the whole
         // XComponent surface lifetime, and no other on-screen wrapper exists.
         let replacement = NonNull::new(unsafe {
             surface::OH_Drawing_SurfaceCreateOnScreen(
-                self.gpu_context.as_ptr(),
+                gpu_context.as_ptr(),
                 image_info,
                 self.window.as_ptr(),
             )
@@ -301,6 +299,22 @@ impl NativeDrawingSurface {
         self.width = width;
         self.height = height;
         Ok(())
+    }
+
+    fn destroy_gpu_surface(&mut self) {
+        // SAFETY: Both handles are uniquely owned by this value. Native
+        // Drawing requires any live surface to be destroyed before its
+        // context.
+        unsafe {
+            if let Some(native_surface) = self.surface.take() {
+                surface::OH_Drawing_SurfaceDestroy(native_surface.as_ptr());
+                release_native_object(NativeObjectKind::Surface);
+            }
+            if let Some(gpu_context) = self.gpu_context.take() {
+                gpu_context::OH_Drawing_GpuContextDestroy(gpu_context.as_ptr());
+                release_native_object(NativeObjectKind::GpuContext);
+            }
+        }
     }
 
     pub fn window(&self) -> NonNull<c_void> {
@@ -1174,19 +1188,32 @@ fn configure_native_window(
     })
 }
 
+fn create_gpu_surface(
+    window: NonNull<c_void>,
+    image_info: OH_Drawing_Image_Info,
+) -> Result<(NonNull<OH_Drawing_GpuContext>, NonNull<OH_Drawing_Surface>)> {
+    // SAFETY: This creates a new, independently owned Native Drawing GPU
+    // context. Its owner destroys it after the associated surface.
+    let gpu_context = NonNull::new(unsafe { gpu_context::OH_Drawing_GpuContextCreate() })
+        .ok_or_else(|| anyhow!("OH_Drawing_GpuContextCreate returned null"))?;
+    // SAFETY: `gpu_context` and `window` are live for this call and
+    // `image_info` describes the XComponent surface dimensions.
+    let native_surface = unsafe {
+        surface::OH_Drawing_SurfaceCreateOnScreen(gpu_context.as_ptr(), image_info, window.as_ptr())
+    };
+    let Some(native_surface) = NonNull::new(native_surface) else {
+        // SAFETY: The context was created above and no surface retained it.
+        unsafe { gpu_context::OH_Drawing_GpuContextDestroy(gpu_context.as_ptr()) };
+        bail!("OH_Drawing_SurfaceCreateOnScreen returned null");
+    };
+    track_native_object(NativeObjectKind::GpuContext, ());
+    track_native_object(NativeObjectKind::Surface, ());
+    Ok((gpu_context, native_surface))
+}
+
 impl Drop for NativeDrawingSurface {
     fn drop(&mut self) {
-        // SAFETY: Both handles are uniquely owned by this value. Native
-        // Drawing requires any live surface to be destroyed before its
-        // context.
-        unsafe {
-            if let Some(native_surface) = self.surface.take() {
-                surface::OH_Drawing_SurfaceDestroy(native_surface.as_ptr());
-                release_native_object(NativeObjectKind::Surface);
-            }
-            gpu_context::OH_Drawing_GpuContextDestroy(self.gpu_context.as_ptr());
-            release_native_object(NativeObjectKind::GpuContext);
-        }
+        self.destroy_gpu_surface();
     }
 }
 

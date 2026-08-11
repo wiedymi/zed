@@ -1,4 +1,4 @@
-import { window } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const LOG_DOMAIN = 0xD002;
@@ -25,6 +25,10 @@ let windowStateHandler: ((
   windowId: number,
   physicalLeft: number,
   physicalTop: number,
+  physicalDisplayLeft: number,
+  physicalDisplayTop: number,
+  physicalDisplayWidth: number,
+  physicalDisplayHeight: number,
   maximized: boolean,
   fullscreen: boolean
 ) => void) | undefined;
@@ -50,13 +54,92 @@ export function configureWindowStage(stage: window.WindowStage): void {
   });
 }
 
-function publishWindowState(windowId: number, targetWindow: window.Window): void {
+function fitAuxiliaryWindowRect(
+  parentWindow: window.Window,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): window.Rect {
+  try {
+    const properties = parentWindow.getWindowProperties();
+    const targetDisplay = typeof properties.displayId === 'number'
+      ? display.getDisplayByIdSync(properties.displayId)
+      : display.getDefaultDisplaySync();
+    // GPUI currently exposes the HarmonyOS default display only. HarmonyOS
+    // reports `globalDisplayRect` for this application window, not the
+    // display origin, so using it would offset every auxiliary window by the
+    // main-window position.
+    const displayLeft = 0;
+    const displayTop = 0;
+    const displayWidth = targetDisplay.availableWidth > 0
+      ? targetDisplay.availableWidth
+      : targetDisplay.width;
+    const displayHeight = targetDisplay.availableHeight > 0
+      ? targetDisplay.availableHeight
+      : targetDisplay.height;
+    const fittedWidth = Math.max(1, Math.min(width, displayWidth));
+    const fittedHeight = Math.max(1, Math.min(height, displayHeight));
+    const maximumLeft = displayLeft + displayWidth - fittedWidth;
+    const maximumTop = displayTop + displayHeight - fittedHeight;
+    const fittedLeft = left >= displayLeft && left <= maximumLeft
+      ? left
+      : displayLeft + Math.floor((displayWidth - fittedWidth) / 2);
+    const fittedTop = top >= displayTop && top <= maximumTop
+      ? top
+      : displayTop + Math.floor((displayHeight - fittedHeight) / 2);
+    if (
+      fittedLeft !== left || fittedTop !== top ||
+      fittedWidth !== width || fittedHeight !== height
+    ) {
+      hilog.info(
+        LOG_DOMAIN,
+        LOG_TAG,
+        'Fitted auxiliary window rect [%{public}d,%{public}d %{public}dx%{public}d] to [%{public}d,%{public}d %{public}dx%{public}d]',
+        left,
+        top,
+        width,
+        height,
+        fittedLeft,
+        fittedTop,
+        fittedWidth,
+        fittedHeight
+      );
+    }
+    return {
+      left: fittedLeft,
+      top: fittedTop,
+      width: fittedWidth,
+      height: fittedHeight
+    };
+  } catch (error) {
+    hilog.warn(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Unable to fit auxiliary window rect to its display: %{public}s',
+      JSON.stringify(error)
+    );
+    return { left: left, top: top, width: width, height: height };
+  }
+}
+
+function publishWindowState(windowId: number, targetWindow: window.Window): boolean {
   const handler = windowStateHandler;
   if (!handler) {
-    return;
+    return false;
   }
   try {
-    const rect = targetWindow.getWindowProperties().windowRect;
+    const properties = targetWindow.getWindowProperties();
+    const rect = properties.windowRect;
+    const targetDisplay = typeof properties.displayId === 'number'
+      ? display.getDisplayByIdSync(properties.displayId)
+      : display.getDefaultDisplaySync();
+    const displayWidth = targetDisplay.availableWidth > 0
+      ? targetDisplay.availableWidth
+      : targetDisplay.width;
+    const displayHeight = targetDisplay.availableHeight > 0
+      ? targetDisplay.availableHeight
+      : targetDisplay.height;
     let maximized = false;
     let fullscreen = false;
     try {
@@ -71,17 +154,23 @@ function publishWindowState(windowId: number, targetWindow: window.Window): void
       windowId,
       rect.left,
       rect.top,
+      0,
+      0,
+      displayWidth,
+      displayHeight,
       maximized,
       fullscreen
     );
+    return true;
   } catch (error) {
     hilog.error(
       LOG_DOMAIN,
       LOG_TAG,
       'Failed to publish state for window %{public}d: %{public}s',
       windowId,
-      JSON.stringify(error)
+      `${error}`
     );
+    return false;
   }
 }
 
@@ -105,7 +194,6 @@ function publishWindowActivation(windowId: number, active: boolean): void {
 
 function observeWindow(windowId: number, targetWindow: window.Window): void {
   if (observedWindowIds.has(windowId)) {
-    publishWindowState(windowId, targetWindow);
     return;
   }
   try {
@@ -117,9 +205,12 @@ function observeWindow(windowId: number, targetWindow: window.Window): void {
     });
     targetWindow.on('windowEvent', (event: window.WindowEventType): void => {
       if (event === window.WindowEventType.WINDOW_ACTIVE) {
+        publishWindowState(windowId, targetWindow);
         publishWindowActivation(windowId, true);
       } else if (event === window.WindowEventType.WINDOW_INACTIVE) {
         publishWindowActivation(windowId, false);
+      } else if (event === window.WindowEventType.WINDOW_SHOWN) {
+        publishWindowState(windowId, targetWindow);
       } else if (event === window.WindowEventType.WINDOW_DESTROYED && windowId !== 0) {
         requestAuxiliaryClose(windowId);
         auxiliaryWindows.delete(windowId);
@@ -187,7 +278,11 @@ function requestAuxiliaryClose(windowId: number): void {
 function observeAuxiliaryClose(windowId: number, targetWindow: window.Window): void {
   try {
     targetWindow.on('windowWillClose', (): Promise<boolean> => {
-      requestAuxiliaryClose(windowId);
+      // Returning true asks HarmonyOS to keep the native window alive while
+      // GPUI runs `should_close` and removes its window. Entering Rust inside
+      // this callback would re-enter GPUI before ArkUI finishes the native
+      // close event, so deliver the request in the next ArkTS task.
+      setTimeout((): void => requestAuxiliaryClose(windowId), 0);
       return Promise.resolve(true);
     });
   } catch (error) {
@@ -227,6 +322,10 @@ export function setWindowStateHandler(handler: ((
   windowId: number,
   physicalLeft: number,
   physicalTop: number,
+  physicalDisplayLeft: number,
+  physicalDisplayTop: number,
+  physicalDisplayWidth: number,
+  physicalDisplayHeight: number,
   maximized: boolean,
   fullscreen: boolean
 ) => void) | undefined): void {
@@ -240,6 +339,13 @@ export function setWindowStateHandler(handler: ((
   auxiliaryWindows.forEach((targetWindow: window.Window, windowId: number): void => {
     observeWindow(windowId, targetWindow);
   });
+}
+
+export function refreshMainWindowState(): boolean {
+  if (mainWindow) {
+    return publishWindowState(0, mainWindow);
+  }
+  return false;
 }
 
 export function setWindowActivationHandler(
@@ -264,6 +370,16 @@ async function createAuxiliaryWindow(
   if (!stage) {
     throw new Error('HarmonyOS window stage is not configured');
   }
+  let parentWindow: window.Window;
+  try {
+    parentWindow = mainWindow ?? await stage.getMainWindow();
+  } catch (error) {
+    throw new Error(
+      `Unable to obtain the parent for HarmonyOS window ${windowId}: ${JSON.stringify(error)}`
+    );
+  }
+  mainWindow = parentWindow;
+  const fittedRect = fitAuxiliaryWindowRect(parentWindow, left, top, width, height);
   let createdWindow: window.Window;
   try {
     createdWindow = await stage.createSubWindowWithOptions(`zed-window-${windowId}`, {
@@ -272,10 +388,10 @@ async function createAuxiliaryWindow(
       isModal: false,
       maximizeSupported: true,
       windowRect: {
-        left: left,
-        top: top,
-        width: width,
-        height: height
+        left: fittedRect.left,
+        top: fittedRect.top,
+        width: fittedRect.width,
+        height: fittedRect.height
       }
     });
   } catch (error) {
@@ -287,8 +403,8 @@ async function createAuxiliaryWindow(
     const storage = new LocalStorage(new AuxiliaryPageStorage(windowId));
     await createdWindow.loadContent('pages/Auxiliary', storage);
     await createdWindow.setWindowTitle(title);
-    await createdWindow.resize(width, height);
-    await createdWindow.moveWindowTo(left, top);
+    await createdWindow.resize(fittedRect.width, fittedRect.height);
+    await createdWindow.moveWindowTo(fittedRect.left, fittedRect.top);
     await createdWindow.showWindow();
     observeWindow(windowId, createdWindow);
     return createdWindow;

@@ -21,6 +21,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { notificationManager } from '@kit.NotificationKit';
 import {
   controlWindow,
+  refreshMainWindowState,
   setWindowActivationHandler,
   setWindowStateHandler
 } from '../entryability/AuxiliaryWindow';
@@ -110,6 +111,10 @@ interface ZedNativeContext extends FileDropNativeContext {
     windowId: number,
     physicalLeft: number,
     physicalTop: number,
+    physicalDisplayLeft: number,
+    physicalDisplayTop: number,
+    physicalDisplayWidth: number,
+    physicalDisplayHeight: number,
     maximized: boolean,
     fullscreen: boolean
   ): void;
@@ -122,7 +127,7 @@ interface ZedNativeContext extends FileDropNativeContext {
 
 class ZedFrameCallback extends FrameCallback {
   private nativeContext: ZedNativeContext;
-  private scheduled: boolean = false;
+  private mainWindowStatePending: boolean = true;
 
   constructor(nativeContext: ZedNativeContext) {
     super();
@@ -130,16 +135,14 @@ class ZedFrameCallback extends FrameCallback {
   }
 
   request(uiContext: UIContext): void {
-    if (this.scheduled) {
-      return;
-    }
-    this.scheduled = true;
     uiContext.postFrameCallback(this);
   }
 
   onFrame(_frameTimeInNano: number): void {
-    this.scheduled = false;
     this.nativeContext.onFrame();
+    if (this.mainWindowStatePending) {
+      this.mainWindowStatePending = !refreshMainWindowState();
+    }
   }
 
   onIdle(_timeLeftInNano: number): void {
@@ -665,6 +668,10 @@ struct Index {
             windowId: number,
             physicalLeft: number,
             physicalTop: number,
+            physicalDisplayLeft: number,
+            physicalDisplayTop: number,
+            physicalDisplayWidth: number,
+            physicalDisplayHeight: number,
             maximized: boolean,
             fullscreen: boolean
           ): void => {
@@ -672,6 +679,10 @@ struct Index {
               windowId,
               physicalLeft,
               physicalTop,
+              physicalDisplayLeft,
+              physicalDisplayTop,
+              physicalDisplayWidth,
+              physicalDisplayHeight,
               maximized,
               fullscreen
             );
@@ -772,6 +783,7 @@ struct Index {
           const nativeContext = this.nativeContext;
           if (nativeContext) {
             nativeContext.setScaleFactor(1 / this.getUIContext().px2vp(1));
+            refreshMainWindowState();
           }
         })
         .width('100%')

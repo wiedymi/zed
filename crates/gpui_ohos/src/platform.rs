@@ -293,6 +293,10 @@ pub fn update_arkui_window_state(
     window_id: u32,
     physical_left: i32,
     physical_top: i32,
+    physical_display_left: i32,
+    physical_display_top: i32,
+    physical_display_width: u32,
+    physical_display_height: u32,
     maximized: bool,
     fullscreen: bool,
 ) -> Result<()> {
@@ -304,6 +308,10 @@ pub fn update_arkui_window_state(
                 window_id,
                 physical_left,
                 physical_top,
+                physical_display_left,
+                physical_display_top,
+                physical_display_width,
+                physical_display_height,
                 maximized,
                 fullscreen,
             )
@@ -551,7 +559,7 @@ impl OhosPlatform {
 
     fn request_frame(&self) {
         for window in self.windows.borrow().iter() {
-            window.borrow_mut().frame_requested = true;
+            window.borrow_mut().pending_frame.request(false);
         }
         self.dispatcher.request_main_wake();
     }
@@ -598,8 +606,19 @@ impl OhosPlatform {
             phase,
             AppLifecyclePhase::Active | AppLifecyclePhase::Foreground
         ) {
-            self.request_frame();
+            self.request_frame_after_native_transition();
         }
+    }
+
+    fn request_frame_after_native_transition(&self) {
+        // ArkUI can discard a frame callback that belonged to a native window
+        // which was just hidden or destroyed. Clear that stale outstanding
+        // wake, then force GPUI to rebuild and present the surviving surfaces.
+        self.dispatcher.begin_frame();
+        for window in self.windows.borrow().iter() {
+            window.borrow_mut().pending_frame.request(true);
+        }
+        self.dispatcher.request_main_wake();
     }
 
     fn handle_memory_warning(&self) {
@@ -710,19 +729,18 @@ impl OhosPlatform {
                     );
                 }
             }
-            let mut callback = {
+            let (frame_options, mut callback) = {
                 let mut state = window.borrow_mut();
-                if !state.frame_requested || !state.surface_available {
+                if !state.active || !state.surface_available {
                     continue;
                 }
-                state.frame_requested = false;
-                state.callbacks.request_frame.take()
+                let Some(frame_options) = state.pending_frame.take() else {
+                    continue;
+                };
+                (frame_options, state.callbacks.request_frame.take())
             };
             if let Some(callback) = callback.as_mut() {
-                callback(RequestFrameOptions {
-                    require_presentation: true,
-                    force_render: false,
-                });
+                callback(frame_options);
             }
             if let Some(callback) = callback {
                 window.borrow_mut().callbacks.request_frame = Some(callback);
@@ -785,7 +803,8 @@ impl OhosPlatform {
             self.request_frame();
             return Ok(());
         }
-        self.scale_factor.set(scale_factor);
+        let previous_scale_factor = self.scale_factor.replace(scale_factor);
+        self.display.scale(previous_scale_factor / scale_factor);
         log_message(
             LogLevel::Info,
             format!("updated ArkUI display scale factor: {scale_factor:.3}"),
@@ -816,19 +835,10 @@ impl OhosPlatform {
                     if !state.maximized && !state.fullscreen {
                         state.windowed_bounds = state.bounds;
                     }
-                    (
-                        size,
-                        state.lifecycle.is_primary(),
-                        state.callbacks.resize.take(),
-                    )
+                    (size, state.callbacks.resize.take())
                 })
             };
-            if let Some((size, primary, mut callback)) = resize {
-                if primary {
-                    self.display
-                        .bounds
-                        .replace(Bounds::new(Point::default(), size));
-                }
+            if let Some((size, mut callback)) = resize {
                 if let Some(callback) = callback.as_mut() {
                     callback(size, scale_factor);
                 }
@@ -1215,7 +1225,7 @@ impl OhosPlatform {
                 ),
             }
         }
-        window.borrow_mut().frame_requested = true;
+        window.borrow_mut().pending_frame.request(false);
         self.request_frame();
         Ok(())
     }
@@ -1253,21 +1263,37 @@ impl OhosPlatform {
         let Some(window) = window else {
             return;
         };
-        let mut should_close = window.borrow_mut().callbacks.should_close.take();
-        let allowed = should_close.as_mut().is_none_or(|callback| callback());
-        if let Some(callback) = should_close {
-            window.borrow_mut().callbacks.should_close = Some(callback);
-        }
-        if allowed {
-            let close = {
-                let mut state = window.borrow_mut();
-                state.lifecycle = NativeWindowLifecycle::AuxiliaryClosing;
-                state.callbacks.close.take()
-            };
-            if let Some(callback) = close {
-                callback();
-            }
-        }
+        let mut should_close = {
+            let mut state = window.borrow_mut();
+            state.lifecycle = NativeWindowLifecycle::AuxiliaryClosePending;
+            state.callbacks.should_close.take()
+        };
+        // `windowWillClose` enters Rust while ArkUI is still running its close
+        // callback. Run GPUI's callbacks in the next foreground turn, after
+        // the native close callback returns.
+        self.foreground_executor
+            .spawn(async move {
+                let allowed = should_close.as_mut().is_none_or(|callback| callback());
+                let close = {
+                    let mut state = window.borrow_mut();
+                    if let Some(callback) = should_close {
+                        state.callbacks.should_close = Some(callback);
+                    }
+                    if state.lifecycle != NativeWindowLifecycle::AuxiliaryClosePending {
+                        None
+                    } else if allowed {
+                        state.lifecycle = NativeWindowLifecycle::AuxiliaryClosing;
+                        state.callbacks.close.take()
+                    } else {
+                        state.lifecycle = NativeWindowLifecycle::AuxiliaryOpen;
+                        None
+                    }
+                };
+                if let Some(callback) = close {
+                    callback();
+                }
+            })
+            .detach();
     }
 
     fn update_arkui_window_state(
@@ -1275,6 +1301,10 @@ impl OhosPlatform {
         window_id: u32,
         physical_left: i32,
         physical_top: i32,
+        physical_display_left: i32,
+        physical_display_top: i32,
+        physical_display_width: u32,
+        physical_display_height: u32,
         maximized: bool,
         fullscreen: bool,
     ) -> Result<()> {
@@ -1299,13 +1329,30 @@ impl OhosPlatform {
             if !maximized && !fullscreen {
                 state.windowed_bounds.origin = origin;
             }
+            let display_bounds = state.lifecycle.is_primary().then(|| {
+                Bounds::new(
+                    point(
+                        px(physical_display_left as f32 / state.scale_factor),
+                        px(physical_display_top as f32 / state.scale_factor),
+                    ),
+                    Size::new(
+                        px(physical_display_width as f32 / state.scale_factor),
+                        px(physical_display_height as f32 / state.scale_factor),
+                    ),
+                )
+            });
             (
                 changed.then(|| state.callbacks.moved.take()).flatten(),
-                state.lifecycle.is_primary().then_some(state.bounds),
+                display_bounds,
             )
         };
         if let Some(bounds) = display_bounds {
-            self.display.bounds.replace(bounds);
+            if physical_display_width == 0 || physical_display_height == 0 {
+                bail!(
+                    "HarmonyOS reported an empty display for primary window {window_id}: {physical_display_width}x{physical_display_height}"
+                );
+            }
+            self.display.set_system_bounds(bounds);
         }
         if let Some(callback) = moved.as_mut() {
             callback();
@@ -1324,12 +1371,23 @@ impl OhosPlatform {
             .find(|window| window.borrow().native_window_id == window_id)
             .cloned()
             .with_context(|| format!("activation targeted unknown HarmonyOS window {window_id}"))?;
-        if window.borrow().active == active {
+        let (previous_active, primary, component) = {
+            let state = window.borrow();
+            (state.active, state.lifecycle.is_primary(), state.component)
+        };
+        if previous_active == active {
             return Ok(());
         }
         if active {
+            if primary && let Some(component) = component {
+                with_surface(component, |surface| surface.rebind()).with_context(|| {
+                    format!(
+                        "failed to rebind the primary Native Drawing surface after window {window_id} activation"
+                    )
+                })?;
+            }
             self.activate_window(&window);
-            self.request_frame();
+            self.request_frame_after_native_transition();
         } else {
             update_active(&window, false);
         }
@@ -1363,16 +1421,7 @@ impl OhosPlatform {
             );
         }
         if was_active {
-            let windows = self.windows.borrow().clone();
-            let replacement = windows.last().cloned();
-            for candidate in windows {
-                update_active(
-                    &candidate,
-                    replacement
-                        .as_ref()
-                        .is_some_and(|replacement| Rc::ptr_eq(&candidate, replacement)),
-                );
-            }
+            let replacement = self.windows.borrow().last().cloned();
             if let Some(replacement) = replacement {
                 let (replacement_id, replacement_title) = {
                     let state = replacement.borrow();
@@ -1396,7 +1445,7 @@ impl OhosPlatform {
                         ),
                     );
                 }
-                self.request_frame();
+                self.request_frame_after_native_transition();
             }
         }
     }
@@ -1418,7 +1467,7 @@ impl OhosPlatform {
                     if !state.maximized && !state.fullscreen {
                         state.windowed_bounds = state.bounds;
                     }
-                    state.frame_requested = true;
+                    state.pending_frame.request(false);
                     let callback = state.callbacks.resize.take();
                     (
                         size,
@@ -1428,8 +1477,7 @@ impl OhosPlatform {
                     )
                 };
                 if primary {
-                    let origin = self.display.bounds.borrow().origin;
-                    self.display.bounds.replace(Bounds::new(origin, size));
+                    self.display.set_surface_size(size);
                 }
                 #[cfg(debug_assertions)]
                 log_message(
@@ -1613,7 +1661,7 @@ impl Platform for OhosPlatform {
             surface_size: None,
             screen_origin: Point::default(),
             ime_candidate_bounds: None,
-            frame_requested: true,
+            pending_frame: PendingFrame::Render,
             background: WindowBackgroundAppearance::Opaque,
             callbacks: WindowCallbacks::default(),
             atlas,
@@ -1633,7 +1681,6 @@ impl Platform for OhosPlatform {
                     .retain(|window| !Rc::ptr_eq(window, &state));
                 return Err(error);
             }
-            self.display.bounds.replace(options.bounds);
         } else if let Some((control_window, left, top, width, height)) = auxiliary_window {
             if let Err(error) = control_window(
                 window_id,
@@ -1991,9 +2038,48 @@ impl Platform for OhosPlatform {
     fn on_keyboard_layout_change(&self, _callback: Box<dyn FnMut()>) {}
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+enum DisplayBoundsState {
+    #[default]
+    Unknown,
+    Surface(Bounds<Pixels>),
+    System(Bounds<Pixels>),
+}
+
 #[derive(Default, Debug)]
 struct OhosDisplay {
-    bounds: RefCell<Bounds<Pixels>>,
+    bounds: RefCell<DisplayBoundsState>,
+}
+
+impl OhosDisplay {
+    fn scale(&self, ratio: f32) {
+        let mut state = self.bounds.borrow_mut();
+        *state = match *state {
+            DisplayBoundsState::Unknown => DisplayBoundsState::Unknown,
+            DisplayBoundsState::Surface(bounds) => {
+                DisplayBoundsState::Surface(scale_window_bounds(bounds, ratio))
+            }
+            DisplayBoundsState::System(bounds) => {
+                DisplayBoundsState::System(scale_window_bounds(bounds, ratio))
+            }
+        };
+    }
+
+    fn set_surface_size(&self, size: Size<Pixels>) {
+        let mut state = self.bounds.borrow_mut();
+        if matches!(*state, DisplayBoundsState::System(_)) {
+            return;
+        }
+        let origin = match *state {
+            DisplayBoundsState::Surface(bounds) => bounds.origin,
+            DisplayBoundsState::Unknown | DisplayBoundsState::System(_) => Point::default(),
+        };
+        *state = DisplayBoundsState::Surface(Bounds::new(origin, size));
+    }
+
+    fn set_system_bounds(&self, bounds: Bounds<Pixels>) {
+        self.bounds.replace(DisplayBoundsState::System(bounds));
+    }
 }
 
 impl PlatformDisplay for OhosDisplay {
@@ -2006,7 +2092,10 @@ impl PlatformDisplay for OhosDisplay {
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
-        *self.bounds.borrow()
+        match *self.bounds.borrow() {
+            DisplayBoundsState::Unknown => Bounds::default(),
+            DisplayBoundsState::Surface(bounds) | DisplayBoundsState::System(bounds) => bounds,
+        }
     }
 }
 
@@ -2040,7 +2129,34 @@ struct WindowCallbacks {
 enum NativeWindowLifecycle {
     Primary,
     AuxiliaryOpen,
+    AuxiliaryClosePending,
     AuxiliaryClosing,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PendingFrame {
+    #[default]
+    None,
+    Render,
+    ForceRender,
+}
+
+impl PendingFrame {
+    fn request(&mut self, force_render: bool) {
+        if force_render {
+            *self = Self::ForceRender;
+        } else if *self == Self::None {
+            *self = Self::Render;
+        }
+    }
+
+    fn take(&mut self) -> Option<RequestFrameOptions> {
+        let request = std::mem::take(self);
+        (request != Self::None).then_some(RequestFrameOptions {
+            require_presentation: true,
+            force_render: request == Self::ForceRender,
+        })
+    }
 }
 
 impl NativeWindowLifecycle {
@@ -2074,7 +2190,7 @@ struct WindowState {
     surface_size: Option<(u32, u32)>,
     screen_origin: Point<Pixels>,
     ime_candidate_bounds: Option<Bounds<Pixels>>,
-    frame_requested: bool,
+    pending_frame: PendingFrame,
     background: WindowBackgroundAppearance,
     callbacks: WindowCallbacks,
     atlas: Arc<OhosAtlas>,
@@ -2417,7 +2533,7 @@ impl PlatformWindow for OhosWindow {
             (state.component, state.atlas.clone())
         };
         let Some(component) = component else {
-            self.0.borrow_mut().frame_requested = true;
+            self.0.borrow_mut().pending_frame.request(false);
             return;
         };
         if let Err(error) = with_surface(component, |surface| surface.draw_scene(scene, &atlas)) {
@@ -2505,7 +2621,7 @@ fn create_accessibility_adapter(
 
 fn request_window_frame(window: &Weak<RefCell<WindowState>>) {
     if let Some(window) = window.upgrade() {
-        window.borrow_mut().frame_requested = true;
+        window.borrow_mut().pending_frame.request(false);
         CURRENT_PLATFORM.with_borrow(|current| {
             if let Some(platform) = current.as_ref() {
                 platform.dispatcher.request_main_wake();

@@ -487,6 +487,10 @@ pub fn update_window_state(
     window_id: u32,
     physical_left: i32,
     physical_top: i32,
+    physical_display_left: i32,
+    physical_display_top: i32,
+    physical_display_width: u32,
+    physical_display_height: u32,
     maximized: bool,
     fullscreen: bool,
 ) -> napi_ohos::Result<()> {
@@ -495,6 +499,10 @@ pub fn update_window_state(
             window_id,
             physical_left,
             physical_top,
+            physical_display_left,
+            physical_display_top,
+            physical_display_width,
+            physical_display_height,
             maximized,
             fullscreen,
         )

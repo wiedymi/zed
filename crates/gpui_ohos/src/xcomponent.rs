@@ -370,15 +370,10 @@ unsafe extern "C" fn on_surface_destroyed(
                 }
             }
         });
-        if let Err(error) = emit_pending(
+        emit_pending(
             component.as_ptr() as usize,
             NativeEvent::Surface(NativeSurfaceEvent::Destroyed),
-        ) {
-            log_message(
-                LogLevel::Error,
-                format!("surface destruction dispatch failed: {error:#}"),
-            );
-        }
+        );
         log_message(LogLevel::Info, "destroyed Native Drawing surface");
     });
 }
@@ -656,12 +651,11 @@ fn emit(component: NonNull<OH_NativeXComponent>, event: NativeEvent) -> Result<(
     Ok(())
 }
 
-fn emit_pending(key: usize, event: NativeEvent) -> Result<()> {
-    let handler = PENDING_EVENT_HANDLERS
-        .with_borrow_mut(|handlers| handlers.remove(&key))
-        .ok_or_else(|| anyhow!("XComponent event handler is not installed"))?;
-    dispatch_outside_surface_borrow(key, handler, event);
-    Ok(())
+fn emit_pending(key: usize, event: NativeEvent) {
+    if let Some(handler) = PENDING_EVENT_HANDLERS.with_borrow_mut(|handlers| handlers.remove(&key))
+    {
+        dispatch_outside_surface_borrow(key, handler, event);
+    }
 }
 
 fn dispatch_outside_surface_borrow(

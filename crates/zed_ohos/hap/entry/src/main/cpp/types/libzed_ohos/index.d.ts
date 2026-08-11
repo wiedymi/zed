@@ -66,6 +66,10 @@ export const updateWindowState: (
   windowId: number,
   physicalLeft: number,
   physicalTop: number,
+  physicalDisplayLeft: number,
+  physicalDisplayTop: number,
+  physicalDisplayWidth: number,
+  physicalDisplayHeight: number,
   maximized: boolean,
   fullscreen: boolean
 ) => void;

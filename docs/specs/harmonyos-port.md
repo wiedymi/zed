@@ -1,6 +1,6 @@
 # Spec: Porting Zed to HarmonyOS NEXT / OpenHarmony
 
-**Status:** The audited repository gaps have implementations. The 2026-08-11 `release-fast` HAP builds, signs, and installs in the API 24 emulator. The installed package reveals the production Agent panel only after every panel restores, activates an auxiliary window when ArkUI attaches it, avoids an invalid login-shell environment capture, moves OpenSSH control sockets without a forbidden hard link, and lets ArkUI choose native prompt layout and button style. These changes still need UI and real-server runtime checks.
+**Status:** The audited repository gaps have implementations. The 2026-08-12 `release-fast` HAP builds, signs, and installs in the API 24 emulator. Settings opens as a centered native auxiliary window, writes and reloads a changed value, closes without quitting Zed, and returns a live, repainting main window. A native Trash prompt keeps a disposable file when Cancel is selected. Agent, collaboration, real SSH, and other acceptance checks remain where the tables below say `NeedsRuntime`.
 
 **Author:** wiedymi
 
@@ -27,7 +27,7 @@ The milestone is complete when all of the following work in the PC emulator:
 
 This milestone does not require HNP or any external executable.
 
-### Current implementation snapshot (2026-08-11)
+### Current implementation snapshot (2026-08-12)
 
 The port is past the scaffold stage. The installed HAP boots the real
 `workspace::MultiWorkspace` and `workspace::Workspace` shell, opens a real
@@ -43,14 +43,14 @@ but they still need a runtime check.
 | Rust HAP bootstrap | Working in the API 24 x86_64 PC emulator |
 | Real GPUI workspace | Working; tabbed editor, status/dock chrome, Project, Outline, Git, and Terminal panels use production Zed entities. Every newly created `Workspace` runs the OHOS panel initializer, including workspaces created by Open Folder, Open Recent, and clone flows. A live `test` to `zed` folder switch retained the Project and Terminal docks on-device. Dock sizes are clamped only after usable workspace bounds exist, and a resized Project panel reopens at its previous width. The latest Agent lazy-load action and Collaboration core panel integration need a runtime check. |
 | Native Drawing | Native quads, per-corner rounding, content clips, solid/dashed borders, gradients, slash/checkerboard patterns, drop/inset shadows, tessellated paths, straight/wavy underlines, sprite transforms, and monochrome/subpixel/polychrome atlas sprites are implemented. The renderer now draws each GPUI scene directly to the on-screen Native Drawing canvas and flushes once. It does not build an intermediate Native Drawing display list. Native atlas bitmaps remain cached per tile revision and color transform because Native Drawing has no GPUI atlas backend. Oklab gradients use 257 sampled native stops. Simplified/Traditional Chinese and colored HMOS emoji fallback are verified. The direct-rendering and Oklab changes need a runtime pass. |
-| Frame scheduling | Demand-driven ArkUI `UIContext.postFrameCallback`, requested from Rust through an N-API thread-safe function. ArkTS permits only one outstanding frame callback, and Rust applies only the newest pending XComponent resize at that frame boundary. Release builds compile out per-frame, resize, and input debug logging. After removing an OHOS pipe-read readiness spin, the foreground and GPUI worker threads remain asleep while the app is idle. |
+| Frame scheduling | Demand-driven ArkUI `UIContext.postFrameCallback`, requested from Rust through an N-API thread-safe function. Rust is the single owner of the outstanding-wake state; ArkTS does not keep a second flag that can remain set when HarmonyOS drops a callback for a hidden window. Rust applies only the newest pending XComponent resize at the frame boundary and explicitly models normal versus forced frames. Release builds compile out per-frame, resize, and input debug logging. After removing an OHOS pipe-read readiness spin, the foreground and GPUI worker threads remain asleep while the app is idle. |
 | Scale and resize | Dynamic ArkUI density synchronization and physical-to-logical geometry are verified across maximize, restore, and live resize. A 24-frame baseline capture and a 12-frame capture after resize coalescing contained no blank/black frame; physical and logical bounds changed together while scale remained exactly `1.9`. |
 | Input | Hardware keys, mouse buttons/motion, touchscreen taps, touch-to-caret, focus, native IME attachment, and ArkUI mouse-wheel axis scrolling work. `onKeyPreIme` forwards hardware keys before the system IME consumes printable key-down events, while `onKeyEvent` remains the fallback. Typed text comes from ArkUI `keyText`/Unicode rather than a US-layout table; physical Shift+9 produces `(` and physical Space separates terminal arguments on-device. Mouse-originated synthetic touch events are ignored so one desktop click cannot open and immediately close a menu. The XComponent API does not provide a click count. `gpui_ohos` now derives consecutive clicks from the previous button, position, and press time with a 400 ms and 5 px limit. Double-click still needs a runtime check. |
 | Persistence | Real sandbox file save and reopen working through `BufferStore` |
 | Clipboard | HarmonyOS system pasteboard read/write working; on-device round trip verified and pasteboard permission handled by `EntryAbility` |
 | Credentials | HarmonyOS Asset Store read/write/delete working with persistent, encrypted records; restart survival and deletion verified on-device |
 | Agent/network UI | Production Agent panel, language-model/provider initialization, ACP tools, web-search providers, prompt store, and real Reqwest HTTP client are enabled. The Agent action is registered before asynchronous panel restore. If the panel is absent, the action creates it before it gives it focus. OHOS reveals the loaded production panel only after all other panels finish restoring, so a later dock restore cannot hide it. This path needs a runtime check. Provider use still requires normal account or API configuration. |
-| App menu/system bridges | In-window Zed/File/Edit/Selection/View/Go/Run/Help menus use production actions. View includes the Agent and Collaboration panel actions. Settings and later GPUI windows use non-modal ArkUI subwindows with independent XComponents, surfaces, atlases, input, and close lifecycle. ArkUI attachment makes the auxiliary GPUI window active before it accepts input. ArkUI window lifecycle events now keep the active GPUI window equal to the native active window. This restores the main view when HarmonyOS moves focus back without sending `windowWillClose`. A native close or destroy event still goes through GPUI so it can apply `should_close`, release the view, and destroy the subwindow. A failed resize no longer requeues itself after ArkUI destroys an auxiliary surface; the backend marks that surface unavailable until a new native lifecycle event recreates it. The app creates its configuration directory before Settings or a language server uses it. ArkUI applies the requested auxiliary size and position before show. OHOS uses explicit application quit. Two-answer native prompts use ArkUI's explicit primary/secondary button contract, keep their GPUI answer indices, and give Cancel default keyboard focus. The icon uses the real Zed mark with a larger safe area. These changes still need runtime checks. |
+| App menu/system bridges | In-window Zed/File/Edit/Selection/View/Go/Run/Help menus use production actions. View includes the Agent and Collaboration panel actions. Settings and later GPUI windows use non-modal ArkUI subwindows with independent XComponents, surfaces, atlases, input, and close lifecycle. ArkUI attachment makes the auxiliary GPUI window active before it accepts input. ArkUI window lifecycle events keep the active GPUI window equal to the native active window. Native Drawing invalidates the hidden main on-screen wrapper when an auxiliary window becomes active, so `gpui_ohos` draws only the active native window and rebuilds the main surface and GPU context after the auxiliary surface is destroyed. Closing Settings is verified to restore a live main window whose menu repaints. A native close or destroy event still goes through GPUI so it can apply `should_close`, release the view, and destroy the subwindow. A failed resize no longer requeues itself after ArkUI destroys an auxiliary surface. The app creates its configuration directory before Settings or a language server uses it. ArkUI applies the requested auxiliary size and position before show; centered placement is verified. A reversible Settings toggle is verified to write, survive close/reopen, and restore. OHOS uses explicit application quit. Two-answer native prompts use ArkUI's explicit primary/secondary button contract, keep their GPUI answer indices, and give Cancel default keyboard focus. A disposable-file Trash Cancel is verified to preserve the file. The icon uses the real Zed mark with a larger safe area. The other native prompt forms still need runtime checks. |
 | External workspaces | `DocumentViewPicker` selection, persistent URI permission, native FileShare URI-to-path resolution, restart restoration, public workspace access, and live folder-to-folder switching with complete workspace docks work on-device. The old OHOS same-window workaround has been removed: Open Folder honors Zed's configured new-window behavior, Open Files and clone's “Open repo in new project” use normal distinct GPUI/native windows. The generalized paths are cross-built and packaged; fresh multi-window runtime coverage is pending. |
 | Drag and drop | ArkUI UDMF file/folder/file-URI records are accepted on main and auxiliary XComponents, resolved through native FileShare URI conversion, and emitted as GPUI `FileDropEvent` enter/move/leave/submit/end sequences. GPUI outbound file/folder drags use ArkUI `executeDrag`, UDMF `File`/`Folder` records, file URIs, and a native preview. Cross-built and packaged; fresh on-device coverage is pending. |
 | Process-backed UI | A private `zedtools` HNP supplies Dash, Toybox 0.8.11, Git 2.51.0, Node.js 22.23.2/npm, OpenSSH 10.4p1 clients, and a native askpass bridge. Terminal pipes, Git init/status/config/add/commit/log, HTTPS `ls-remote`, and shallow clone are verified on-device. PTY creation is denied by the HAP SELinux domain, so terminals use pipes. HarmonyOS app UIDs have no `/etc/passwd` entry. One OpenSSH adapter checks the system database and supplies the current local client identity from `HOME`, `USER`, `LOGNAME`, and `SHELL` when that lookup fails. The shared `misc.c` tilde, subprocess, and home-directory paths use the same adapter. OpenSSH renames its private temporary control socket because the app sandbox rejects hard links. Zed uses its explicit app environment on OHOS instead of trying to execute `/system/bin/appspawn` to capture a login-shell environment. The remote login name still comes from the SSH destination or settings. The rebuilt HNP is installed; a real SSH connection still needs a runtime check. |
@@ -105,7 +105,7 @@ A successful cross-build does not mean that the feature works at runtime.
 | URL/deep-link and shared-file receive | `NeedsRuntime` | `onCreate` and `onNewWant` collect `zed://`, view, file, folder, and shared-file Wants, resolve file URIs, and deliver them through GPUI `on_open_urls`. The manifest declares the required skills. Test cold and warm delivery. |
 | Inbound drag and drop | `NeedsRuntime` | The ArkUI UDMF bridge and GPUI event sequence cross-build. Repeat the test on a connected emulator and physical device. |
 | Outbound drag | `NeedsRuntime` | GPUI file/folder payloads now call ArkUI `executeDrag` with UDMF records, file URIs, and a preview. Test transfer to Files and another application. |
-| Native prompts, pickers, notifications, reveal/open-with | `NeedsRuntime` | OHOS keeps GPUI's platform prompt builder instead of installing Zed's in-app prompt renderer, so ArkUI owns Trash, Delete, Remove, warning, and other confirmations. Two-answer prompts use explicit primary and secondary button objects instead of the generic button-array path. Each action sends its original GPUI answer index, logs that index, and gives Cancel default keyboard focus. The newest package needs a safe Cancel test with a disposable file, then a confirm, warning, and multi-answer runtime pass. |
+| Native prompts, pickers, notifications, reveal/open-with | `NeedsRuntime` | OHOS keeps GPUI's platform prompt builder instead of installing Zed's in-app prompt renderer, so ArkUI owns Trash, Delete, Remove, warning, and other confirmations. Two-answer prompts use explicit primary and secondary button objects instead of the generic button-array path. Each action sends its original GPUI answer index and gives Cancel default keyboard focus. A 2026-08-12 disposable-file test displayed the native Trash/Cancel alert; Cancel preserved the file. Confirm, warning, multi-answer, picker, notification, and reveal/open-with paths still need runtime passes. |
 | Crash reporting | `NeedsRuntime` | `zed_ohos` installs a process-lifetime native HiAppEvent watcher for the FaultLogger `APP_CRASH` event before product startup. The desktop minidump helper is absent. Trigger a test crash and confirm event delivery. |
 | Updates | `ExternalGate` | The commercial SDK provides AppGalleryKit `updateManager.checkAppUpdate` and `showUpdateDialog`, but the current OpenHarmony debug product has no AppGallery listing or credentials. Enable this only in an AppGallery build flavor. OpenHarmony uses its distributor/package manager. Desktop self-replacement stays disabled. |
 | Git, shell, core utilities, Node/npm, OpenSSH | `NeedsRuntime` | Pinned HNP executables are packaged. Git/HTTPS and pipe terminals are verified. OpenSSH handles the missing HarmonyOS `/etc/passwd` entry with a bounded local client identity adapter, uses `rename` instead of a sandbox-denied hard link for its control socket, and receives the explicit app-private environment without an invalid login-shell capture. Repeat Node LSP, tasks, SSH authentication, transfer, Git-over-SSH, and remote workspace tests. |
@@ -125,15 +125,15 @@ desktop CLI installation, and desktop portals are excluded as one capability
 group. Inspector, component preview, and other development-only tools do not
 block product parity.
 
-### Latest build proof (2026-08-11)
+### Latest build proof (2026-08-12)
 
 - `build-ohos.ps1 -Step rust -RustProfile dev` links the complete OHOS Rust product.
 - `build-ohos.ps1 -Step hap -RustProfile release-fast -ReuseExistingNodeBundle` compiles ArkTS, packages HNP, builds the HAP, and signs it successfully.
 - Signed artifact: `crates/zed_ohos/hap/entry/build/default/outputs/default/entry-default-signed.hap`.
-- Size: `413581907` bytes.
-- SHA-256: `645E0BDDE275F5691C3D4A55D31FF171FC71A0BE768001520785B6AFF1C8696A`.
+- Size: `413275333` bytes.
+- SHA-256: `BE5DF9E4D6B761EFA935E3AF0FF0CA215F06CBE18A85827A8E2B5A949B4F16C9`.
 - The resolved normal dependency graph contains none of `ashpd`, zbus, `trash-rs`, ALSA, GLib, LiveKit, or WebRTC.
-- `hdc install -r` installed this artifact on `127.0.0.1:5555` successfully, and `aa force-stop dev.zed.Zed` stopped the previous process. The user will do the UI acceptance checks without UI automation.
+- `hdc install -r` installed this artifact on `127.0.0.1:5555` successfully. Automated simulator checks verified native Trash Cancel, Settings write/reload, centered Settings placement, Settings close, main-window redraw, and main-menu input after close. The final process log contained no drawing, activation, or `EGL_BAD_SURFACE` error.
 
 ## 2. Decisions
 
@@ -165,6 +165,8 @@ The following decisions are authoritative for the initial port:
 24. **UIAbility owns the application lifetime.** Closing a GPUI auxiliary window does not quit the OHOS process. The platform closes that native subwindow, restores the previous native window, and quits only after an explicit application action or ability shutdown.
 25. **XComponent click sequences are derived in `gpui_ohos`.** The native mouse event has a timestamp, button, and position, but no click count. The backend stores only the prior click facts and derives the count with a 400 ms and 5 px limit. This is the same model as other GPUI platforms.
 26. **Packaged OpenSSH has one OHOS local identity adapter.** HarmonyOS application UIDs do not have `/etc/passwd` entries. The HNP build first uses the system database, then supplies the current local `passwd` data that OpenSSH needs from Zed's explicit `HOME`, `USER`, `LOGNAME`, and `SHELL` environment. Client entry points and shared tilde, subprocess, and home-directory helpers use this function. It never supplies an identity for another UID, and it does not replace or change the remote SSH username.
+27. **Rust owns frame coalescing.** The dispatcher is the only source of truth for an outstanding ArkUI frame wake. ArkTS posts every wake that Rust sends and does not retain a second `scheduled` flag. Native window restoration records a forced frame so GPUI rebuilds and presents even when its normal invalidator is clean.
+28. **Only the active OHOS native window presents.** Creating an auxiliary Native Drawing on-screen surface invalidates the hidden main wrapper and its GPU context on the API 24 emulator. `gpui_ohos` therefore skips inactive native windows, destroys and recreates the primary surface and GPU context after the auxiliary surface is gone, and then forces a complete frame. This is a Native Drawing lifecycle rule, not an in-app Settings workaround.
 
 ### Not a current decision
 
@@ -290,7 +292,8 @@ For every XComponent surface:
 6. Translate the current GPUI `Scene` and draw it onto the canvas.
 7. Flush the surface with `OH_Drawing_SurfaceFlush`.
 8. On resize, store only the newest physical size and request an ArkUI frame. At the frame boundary, destroy the old on-screen Drawing wrapper before creating the replacement for the same `OHNativeWindow`. Overlapping wrappers cause the old wrapper to invalidate the replacement EGL surface when destroyed. Clear only a newly created window surface; while replacing a resize wrapper, retain the compositor's previous buffer until the next complete scene is flushed so interactive resize cannot expose a blank frame. If ArkUI has already destroyed the native surface, consume the failed resize once, mark the GPUI surface unavailable, and wait for the next native surface event. Do not schedule an endless retry loop.
-9. On surface destruction, remove all window-bound state and retain only the event handler needed for a later surface-created callback.
+9. Present only the active native window. When the primary window becomes active after an auxiliary surface is destroyed, rebuild its stale on-screen surface and GPU context at the same size and request a forced GPUI frame.
+10. On surface destruction, remove all window-bound state and retain only the event handler needed for a later surface-created callback.
 
 ArkTS recomputes `1 / UIContext.px2vp(1)` on every XComponent area change and
 sends it through a dedicated N-API scale bridge. `gpui_ohos` updates the window
@@ -304,10 +307,11 @@ Frame production is demand-driven through ArkUI. A Rust dispatcher wake calls an
 N-API thread-safe function; ArkTS posts a `FrameCallback` with
 `UIContext.postFrameCallback`; that callback re-enters Rust and drains the GPUI
 foreground queue before rendering. GPUI invalidation schedules only the next
-required frame. The ArkTS callback tracks whether it is already scheduled so
-repeated Rust wakes cannot enqueue duplicate callbacks. XComponent resize events
-replace one pending physical size, which Rust applies immediately before GPUI's
-frame callback; no intermediate resize creates a redundant Drawing surface.
+required frame. The Rust dispatcher coalesces repeated wakes. ArkTS does not keep
+another outstanding-frame flag because HarmonyOS can discard a callback while a
+native window is hidden. XComponent resize events replace one pending physical
+size, which Rust applies immediately before GPUI's frame callback; no
+intermediate resize creates a redundant Drawing surface.
 `OH_NativeVSync_RequestFrame` is intentionally not used because GPUI foreground
 work and XComponent callbacks must remain coordinated with the ArkUI UI thread.
 
@@ -412,12 +416,15 @@ store updates remain capability-gated external providers. The product does not
 mark them as successful no-ops.
 
 `gpui_ohos` routes native callbacks by each XComponent's actual ArkUI ID,
-renders requested windows independently during a frame, and removes auxiliary
+renders the active requested window during a frame, and removes auxiliary
 GPUI state before asking ArkTS to destroy its subwindow. When HarmonyOS emits
 `windowWillClose`, ArkUI first runs GPUI's `should_close`/`close` callbacks. A
 destroy event is a fallback for native close paths that omit that callback.
 Independent active/inactive events keep GPUI focus synchronized even when the
-system only returns focus to the parent window. ArkUI window rect/status events
+system only returns focus to the parent window. Primary reactivation rebuilds
+its Native Drawing surface and GPU context after the auxiliary surface is gone and forces a full
+frame, which prevents `EGL_BAD_SURFACE` from leaving a logically live but stale
+main view. ArkUI window rect/status events
 update GPUI origin/maximize/fullscreen state;
 surface resize changes only the logical size and cannot reset the persisted
 window origin.
@@ -627,7 +634,8 @@ targets and distribution credentials. These facts cannot be replaced by a shim.
 
 - [ ] Test physical aarch64 PC/2-in-1 hardware.
 - [ ] Validate OpenHarmony runtime compatibility and packaging differences.
-- [ ] Open Settings in a separate non-modal native window with server decorations and independent rendering/input. The configuration directory is created before the settings watcher starts. ArkUI attachment activates the auxiliary GPUI window. Native active/inactive events synchronize GPUI focus when HarmonyOS returns to the main window without `windowWillClose`. Native close and destroy events still route through GPUI. Closing a destroyed surface no longer retries a failed resize each frame. Verify configuration writes, live changes, centered placement, close, and return to the main window with the latest build.
+- [x] Open Settings in a separate non-modal native window with server decorations and independent rendering/input. Centered placement, close, main-surface/GPU-context rebuild, and return to a repainting, interactive main menu are verified on-device. Native close and destroy events still route through GPUI, and closing a destroyed surface no longer retries a failed resize each frame.
+- [x] Verify a Settings configuration write and live change on-device, including persistence after close/reopen and restoration of the original value.
 - [ ] Generalize the platform to arbitrary workspace/tool windows; route normal Open Folder/Open Files/clone new-window flows through it and synchronize native position/maximize/fullscreen state back into GPUI bounds persistence. Verify close and centered placement after the re-entrant close fix and explicit ArkUI move.
 - [x] Implement inbound file/folder drag and drop through ArkUI UDMF and GPUI `FileDropEvent` routing for main and auxiliary windows.
 - [ ] Verify general new-window persistence and drag/drop on-device.
@@ -649,7 +657,7 @@ targets and distribution credentials. These facts cannot be replaced by a shim.
 |---|---|
 | OHOS accidentally compiles desktop Linux paths | Gate with `target_env = "ohos"` and audit the resolved Cargo graph |
 | Native Drawing does not map cleanly to a GPUI primitive | Build renderer examples in primitive order before booting full Zed |
-| Native handles outlive the XComponent surface | Centralize ownership, destroy the old on-screen wrapper before rebinding the same NativeWindow, and recreate all window-dependent resources on lifecycle callbacks |
+| Native handles outlive the XComponent surface | Centralize ownership, destroy the old on-screen surface before rebuilding the same NativeWindow, and recreate its GPU context and other window-dependent resources on lifecycle callbacks |
 | ArkUI/native callbacks re-enter GPUI | Never hold the foreground queue or surface-state borrow while running a task/event handler; contain all panics at C callback boundaries |
 | Density arrives before the GPUI window exists | Store scale factor on the platform and apply it when every window is created |
 | Text shaping or system fonts differ from Linux | Reuse existing shaping initially and load HarmonyOS font paths explicitly |
