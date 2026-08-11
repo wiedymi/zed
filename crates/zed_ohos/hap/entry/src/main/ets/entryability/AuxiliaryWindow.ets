@@ -18,6 +18,7 @@ enum WindowCommand {
 let windowStage: window.WindowStage | undefined;
 let mainWindow: window.Window | undefined;
 const auxiliaryWindows: Map<number, window.Window> = new Map();
+const auxiliaryCloseHandlers: Map<number, () => void> = new Map();
 const observedWindowIds: Set<number> = new Set();
 let windowOperation: Promise<void> = Promise.resolve();
 let windowStateHandler: ((
@@ -126,6 +127,66 @@ function stopObservingWindow(windowId: number, targetWindow: window.Window): voi
   }
 }
 
+function observeAuxiliaryClose(windowId: number, targetWindow: window.Window): void {
+  try {
+    targetWindow.on('windowWillClose', (): Promise<boolean> => {
+      const handler = auxiliaryCloseHandlers.get(windowId);
+      if (!handler) {
+        hilog.warn(
+          LOG_DOMAIN,
+          LOG_TAG,
+          'Ignored a close request while auxiliary window %{public}d was not ready',
+          windowId
+        );
+        return Promise.resolve(true);
+      }
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'Sending close request for auxiliary window %{public}d to GPUI', windowId);
+      try {
+        handler();
+      } catch (error) {
+        hilog.error(
+          LOG_DOMAIN,
+          LOG_TAG,
+          'Failed to request GPUI close for auxiliary window %{public}d: %{public}s',
+          windowId,
+          JSON.stringify(error)
+        );
+      }
+      return Promise.resolve(true);
+    });
+  } catch (error) {
+    throw new Error(
+      `Unable to observe close for HarmonyOS window ${windowId}: ${JSON.stringify(error)}`
+    );
+  }
+}
+
+function stopObservingAuxiliaryClose(windowId: number, targetWindow: window.Window): void {
+  auxiliaryCloseHandlers.delete(windowId);
+  try {
+    targetWindow.off('windowWillClose');
+  } catch (error) {
+    hilog.error(
+      LOG_DOMAIN,
+      LOG_TAG,
+      'Failed to stop observing close for auxiliary window %{public}d: %{public}s',
+      windowId,
+      JSON.stringify(error)
+    );
+  }
+}
+
+export function setAuxiliaryCloseHandler(
+  windowId: number,
+  handler: (() => void) | undefined
+): void {
+  if (handler) {
+    auxiliaryCloseHandlers.set(windowId, handler);
+  } else {
+    auxiliaryCloseHandlers.delete(windowId);
+  }
+}
+
 export function setWindowStateHandler(handler: ((
   windowId: number,
   physicalLeft: number,
@@ -180,6 +241,7 @@ async function createAuxiliaryWindow(
   }
   auxiliaryWindows.set(windowId, createdWindow);
   try {
+    observeAuxiliaryClose(windowId, createdWindow);
     const storage = new LocalStorage(new AuxiliaryPageStorage(windowId));
     await createdWindow.loadContent('pages/Auxiliary', storage);
     await createdWindow.setWindowTitle(title);
@@ -190,6 +252,7 @@ async function createAuxiliaryWindow(
     return createdWindow;
   } catch (error) {
     auxiliaryWindows.delete(windowId);
+    stopObservingAuxiliaryClose(windowId, createdWindow);
     stopObservingWindow(windowId, createdWindow);
     await createdWindow.destroyWindow().catch((): void => {});
     throw new Error(`Unable to create HarmonyOS window ${windowId}: ${JSON.stringify(error)}`);
@@ -241,6 +304,7 @@ async function applyWindowCommand(
       return;
     }
     auxiliaryWindows.delete(windowId);
+    stopObservingAuxiliaryClose(windowId, auxiliaryWindow);
     stopObservingWindow(windowId, auxiliaryWindow);
     try {
       await auxiliaryWindow.destroyWindow();

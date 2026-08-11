@@ -1312,7 +1312,7 @@ impl OhosPlatform {
             let state = window.borrow();
             (
                 state.component,
-                state.lifecycle == NativeWindowLifecycle::AuxiliaryOpen,
+                !state.lifecycle.is_primary(),
                 state.active,
                 state.native_window_id,
                 state.title.clone(),

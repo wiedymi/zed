@@ -1,4 +1,5 @@
 import { dispatchFileDrag, FileDropNativeContext, fileDropTypes } from '../entryability/FileDrop';
+import { setAuxiliaryCloseHandler } from '../entryability/AuxiliaryWindow';
 
 interface ZedAuxiliaryNativeContext extends FileDropNativeContext {
   setScaleFactor(scaleFactor: number): void;
@@ -47,6 +48,7 @@ struct Auxiliary {
   }
 
   aboutToDisappear(): void {
+    setAuxiliaryCloseHandler(this.windowId, undefined);
     this.nativeContext?.closeAuxiliaryWindow(this.windowId);
     this.nativeContext = undefined;
   }
@@ -61,6 +63,9 @@ struct Auxiliary {
         .onLoad((nativeContext) => {
           const zedContext = nativeContext as ZedAuxiliaryNativeContext;
           this.nativeContext = zedContext;
+          setAuxiliaryCloseHandler(this.windowId, (): void => {
+            zedContext.closeAuxiliaryWindow(this.windowId);
+          });
           zedContext.attachAuxiliaryWindow(this.windowId);
           zedContext.setScaleFactor(1 / this.getUIContext().px2vp(1));
         })
