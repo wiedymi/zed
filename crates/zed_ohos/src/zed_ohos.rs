@@ -26,7 +26,7 @@ use futures::StreamExt as _;
 use git::GitHostingProviderRegistry;
 use gpui::{
     App, AppContext as _, Application, ApplicationHandle, Context, Entity, Focusable as _,
-    Subscription, TaskExt as _, UpdateGlobal as _, WindowOptions,
+    QuitMode, Subscription, TaskExt as _, UpdateGlobal as _, WindowOptions,
 };
 use http_client::HttpClientWithUrl;
 use language::{Buffer, BufferEvent, LanguageRegistry};
@@ -55,6 +55,31 @@ const LAST_WORKSPACE_URI_KEY: &str = "ohos.last_workspace_uri";
 const INITIAL_DOCUMENT: &str = "# Zed on HarmonyOS\n\nThis is a real Zed buffer stored in the app sandbox.\n\nEdit this text, close Zed, and reopen it: your changes are saved automatically.\n";
 #[allow(dead_code)]
 static INSTALL_PANIC_HOOK: Once = Once::new();
+static OHOS_LOGGER: OhosLogger = OhosLogger;
+
+struct OhosLogger;
+
+impl log::Log for OhosLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        let level = match record.level() {
+            log::Level::Error => gpui_ohos::LogLevel::Error,
+            log::Level::Warn => gpui_ohos::LogLevel::Warning,
+            log::Level::Info => gpui_ohos::LogLevel::Info,
+            log::Level::Debug | log::Level::Trace => gpui_ohos::LogLevel::Debug,
+        };
+        gpui_ohos::log_message(level, format!("{}: {}", record.target(), record.args()));
+    }
+
+    fn flush(&self) {}
+}
 
 thread_local! {
     /// Retains GPUI for the lifetime of the ArkUI process. HarmonyOS owns the
@@ -726,6 +751,12 @@ fn configure_sandbox_paths(files_dir: &str, cache_dir: &str) -> Result<SandboxPa
         .with_context(|| format!("configuring Zed data at {}", data_dir.display()))?;
     paths::try_set_custom_temp_dir(&cache_dir)
         .with_context(|| format!("configuring Zed cache at {}", cache_dir.display()))?;
+    std_fs::create_dir_all(paths::config_dir()).with_context(|| {
+        format!(
+            "creating the HarmonyOS configuration directory at {}",
+            paths::config_dir().display()
+        )
+    })?;
     let git_metadata_dir = data_dir.join("git");
     std_fs::create_dir_all(&git_metadata_dir).with_context(|| {
         format!(
@@ -776,6 +807,7 @@ fn require_absolute_directory(path: &str, source: &str) -> Result<PathBuf> {
 }
 
 fn start_zed(sandbox_paths: SandboxPaths) -> Result<()> {
+    install_logger();
     if APPLICATION.with_borrow(Option::is_some) {
         return Ok(());
     }
@@ -792,6 +824,7 @@ fn start_zed(sandbox_paths: SandboxPaths) -> Result<()> {
 
     let application = Application::with_platform(gpui_ohos::current_platform(false))
         .with_assets(Assets)
+        .with_quit_mode(QuitMode::Explicit)
         .run_embedded(move |cx| {
             if let Err(error) = initialize_zed(cx, sandbox_paths) {
                 launch_result_for_callback.replace(Some(error));
@@ -811,6 +844,16 @@ fn start_zed(sandbox_paths: SandboxPaths) -> Result<()> {
         "Zed runtime initialized on HarmonyOS",
     );
     Ok(())
+}
+
+fn install_logger() {
+    if log::set_logger(&OHOS_LOGGER).is_ok() {
+        log::set_max_level(if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        });
+    }
 }
 
 fn handle_incoming_urls(urls: Vec<String>, cx: &mut App) {
@@ -1193,7 +1236,9 @@ fn initialize_zed(cx: &mut App, sandbox_paths: SandboxPaths) -> Result<()> {
                 settings_profile_selector::init(cx);
                 language_tools::init(cx);
                 channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
+                call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
                 notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+                collab_ui::init(&app_state, cx);
                 feedback::init(cx);
                 markdown_preview::init(cx);
                 csv_preview::init(cx);

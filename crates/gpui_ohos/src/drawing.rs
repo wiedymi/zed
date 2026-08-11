@@ -19,17 +19,17 @@ use crate::atlas::{OhosAtlas, TilePixels};
 use ohos_sys::drawing::{
     bitmap, brush, canvas,
     canvas::OH_Drawing_CanvasClipOp,
-    filter, gpu_context, mask_filter, matrix, path, path_effect, pen, point, record_cmd, rect,
-    round_rect, sampling_options,
+    filter, gpu_context, mask_filter, matrix, path, path_effect, pen, point, rect, round_rect,
+    sampling_options,
     sampling_options::{OH_Drawing_FilterMode, OH_Drawing_MipmapMode},
     shader_effect, surface,
     types::{
         OH_Drawing_AlphaFormat, OH_Drawing_Bitmap, OH_Drawing_BlendMode, OH_Drawing_Brush,
         OH_Drawing_Canvas, OH_Drawing_ColorFormat, OH_Drawing_Corner_Radii, OH_Drawing_Filter,
         OH_Drawing_GpuContext, OH_Drawing_Image_Info, OH_Drawing_MaskFilter, OH_Drawing_Matrix,
-        OH_Drawing_Path, OH_Drawing_PathEffect, OH_Drawing_Pen, OH_Drawing_Point,
-        OH_Drawing_RecordCmd, OH_Drawing_RecordCmdUtils, OH_Drawing_Rect, OH_Drawing_RoundRect,
-        OH_Drawing_SamplingOptions, OH_Drawing_ShaderEffect, OH_Drawing_Surface,
+        OH_Drawing_Path, OH_Drawing_PathEffect, OH_Drawing_Pen, OH_Drawing_Point, OH_Drawing_Rect,
+        OH_Drawing_RoundRect, OH_Drawing_SamplingOptions, OH_Drawing_ShaderEffect,
+        OH_Drawing_Surface,
     },
 };
 use ohos_sys::native_window::{
@@ -41,8 +41,6 @@ use ohos_sys::native_window::{
 enum NativeObjectKind {
     GpuContext,
     Surface,
-    RecordUtils,
-    RecordCommand,
     Bitmap,
     Sampling,
     Filter,
@@ -60,11 +58,9 @@ enum NativeObjectKind {
 
 #[cfg(debug_assertions)]
 impl NativeObjectKind {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 15] = [
         Self::GpuContext,
         Self::Surface,
-        Self::RecordUtils,
-        Self::RecordCommand,
         Self::Bitmap,
         Self::Sampling,
         Self::Filter,
@@ -88,8 +84,6 @@ impl NativeObjectKind {
         match self {
             Self::GpuContext => "gpu-context",
             Self::Surface => "surface",
-            Self::RecordUtils => "record-utils",
-            Self::RecordCommand => "record-command",
             Self::Bitmap => "bitmap",
             Self::Sampling => "sampling",
             Self::Filter => "filter",
@@ -191,7 +185,6 @@ pub struct NativeDrawingSurface {
     width: u32,
     height: u32,
     sampling: OwnedSamplingOptions,
-    record_commands: OwnedRecordCmdUtils,
     sprite_bitmaps: RefCell<HashMap<SpriteBitmapKey, CachedBitmap>>,
     frame_id: u64,
 }
@@ -240,7 +233,6 @@ impl NativeDrawingSurface {
     pub unsafe fn new(window: NonNull<c_void>, width: u32, height: u32) -> Result<Self> {
         let image_info = configure_native_window(window, width, height)?;
         let sampling = OwnedSamplingOptions::new()?;
-        let record_commands = OwnedRecordCmdUtils::new()?;
 
         // SAFETY: This creates a new, independently owned Native Drawing GPU
         // context. Ownership is released in `Drop`.
@@ -270,7 +262,6 @@ impl NativeDrawingSurface {
             width,
             height,
             sampling,
-            record_commands,
             sprite_bitmaps: RefCell::new(HashMap::new()),
             frame_id: 0,
         })
@@ -279,22 +270,20 @@ impl NativeDrawingSurface {
     /// Rebinds the on-screen surface to the XComponent's new buffer geometry.
     /// The GPU context remains alive across interactive PC-window resizes.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        if self.size() == (width, height) {
+        if self.size() == (width, height) && self.surface.is_some() {
             return Ok(());
         }
 
-        let previous = self
-            .surface
-            .take()
-            .context("Native Drawing surface is unavailable during resize")?;
-        // Native Drawing's on-screen wrappers ultimately own the EGLSurface
-        // associated with this NativeWindow. Two wrappers cannot overlap:
-        // destroying the older wrapper after creating its replacement also
-        // destroys the replacement's EGLSurface (EGL_BAD_SURFACE on flush).
-        // SAFETY: `previous` was uniquely owned and has been removed from the
-        // struct, so Drop cannot destroy it again if rebinding fails.
-        unsafe { surface::OH_Drawing_SurfaceDestroy(previous.as_ptr()) };
-        release_native_object(NativeObjectKind::Surface);
+        if let Some(previous) = self.surface.take() {
+            // Native Drawing's on-screen wrappers ultimately own the EGLSurface
+            // associated with this NativeWindow. Two wrappers cannot overlap:
+            // destroying the older wrapper after creating its replacement also
+            // destroys the replacement's EGLSurface (EGL_BAD_SURFACE on flush).
+            // SAFETY: `previous` was uniquely owned and has been removed from
+            // the struct, so Drop cannot destroy it again if rebinding fails.
+            unsafe { surface::OH_Drawing_SurfaceDestroy(previous.as_ptr()) };
+            release_native_object(NativeObjectKind::Surface);
+        }
 
         let image_info = configure_native_window(self.window, width, height)?;
         // SAFETY: The GPU context and NativeWindow remain live for the whole
@@ -322,6 +311,10 @@ impl NativeDrawingSurface {
         (self.width, self.height)
     }
 
+    pub fn is_available(&self) -> bool {
+        self.surface.is_some()
+    }
+
     pub fn clear(&mut self, color: u32) -> Result<()> {
         let canvas = self.canvas()?;
         // SAFETY: The canvas is borrowed from the live surface and the ARGB
@@ -334,87 +327,66 @@ impl NativeDrawingSurface {
         self.frame_id = self.frame_id.wrapping_add(1);
         #[cfg(debug_assertions)]
         let started_at = Instant::now();
-        let recording_canvas = self.record_commands.begin(self.width, self.height)?;
-        // GPUI scenes are rebuilt completely, so begin with a transparent
-        // target and replay the scene's ordered primitive batches.
-        // SAFETY: `recording_canvas` is owned by `record_commands` until the
-        // matching `finish` call below.
-        unsafe { canvas::OH_Drawing_CanvasClear(recording_canvas.as_ptr(), 0x00000000) };
-
-        let draw_result = (|| -> Result<()> {
-            for batch in scene.batches() {
-                match batch {
-                    PrimitiveBatch::Shadows(range) => {
-                        for shadow in &scene.shadows[range] {
-                            self.draw_shadow(recording_canvas, shadow)?;
-                        }
-                    }
-                    PrimitiveBatch::Quads(range) => {
-                        for quad in &scene.quads[range] {
-                            self.draw_quad(recording_canvas, quad)?;
-                        }
-                    }
-                    PrimitiveBatch::Paths(range) => {
-                        for scene_path in &scene.paths[range] {
-                            self.draw_path(recording_canvas, scene_path)?;
-                        }
-                    }
-                    PrimitiveBatch::Underlines(range) => {
-                        for underline in &scene.underlines[range] {
-                            self.draw_underline(recording_canvas, underline)?;
-                        }
-                    }
-                    PrimitiveBatch::MonochromeSprites { range, .. } => {
-                        for sprite in &scene.monochrome_sprites[range] {
-                            self.draw_monochrome_sprite(recording_canvas, sprite, atlas)?;
-                        }
-                    }
-                    PrimitiveBatch::SubpixelSprites { range, .. } => {
-                        for sprite in &scene.subpixel_sprites[range] {
-                            self.draw_subpixel_sprite(recording_canvas, sprite, atlas)?;
-                        }
-                    }
-                    PrimitiveBatch::PolychromeSprites { range, .. } => {
-                        for sprite in &scene.polychrome_sprites[range] {
-                            self.draw_polychrome_sprite(recording_canvas, sprite, atlas)?;
-                        }
-                    }
-                    PrimitiveBatch::Surfaces(_) => {}
-                }
-            }
-            Ok(())
-        })();
-
-        // Always finish a recording that was begun, including when building a
-        // primitive failed, so the utility remains usable for the next frame.
-        let recorded_commands = self.record_commands.finish();
-        draw_result?;
-        let recorded_commands = recorded_commands?;
-        #[cfg(debug_assertions)]
-        let recorded_at = Instant::now();
-
         let native_canvas = self.canvas()?;
-        // SAFETY: Both the destination canvas and recorded command list are
-        // live for this replay. The list is destroyed after the flush below.
-        unsafe {
-            canvas::OH_Drawing_CanvasDrawRecordCmd(
-                native_canvas.as_ptr(),
-                recorded_commands.0.as_ptr(),
-            )
+        // GPUI scenes are rebuilt completely, so begin with a transparent
+        // target and draw the scene's ordered primitive batches.
+        // SAFETY: `native_canvas` is borrowed from the live on-screen surface.
+        unsafe { canvas::OH_Drawing_CanvasClear(native_canvas.as_ptr(), 0x00000000) };
+
+        for batch in scene.batches() {
+            match batch {
+                PrimitiveBatch::Shadows(range) => {
+                    for shadow in &scene.shadows[range] {
+                        self.draw_shadow(native_canvas, shadow)?;
+                    }
+                }
+                PrimitiveBatch::Quads(range) => {
+                    for quad in &scene.quads[range] {
+                        self.draw_quad(native_canvas, quad)?;
+                    }
+                }
+                PrimitiveBatch::Paths(range) => {
+                    for scene_path in &scene.paths[range] {
+                        self.draw_path(native_canvas, scene_path)?;
+                    }
+                }
+                PrimitiveBatch::Underlines(range) => {
+                    for underline in &scene.underlines[range] {
+                        self.draw_underline(native_canvas, underline)?;
+                    }
+                }
+                PrimitiveBatch::MonochromeSprites { range, .. } => {
+                    for sprite in &scene.monochrome_sprites[range] {
+                        self.draw_monochrome_sprite(native_canvas, sprite, atlas)?;
+                    }
+                }
+                PrimitiveBatch::SubpixelSprites { range, .. } => {
+                    for sprite in &scene.subpixel_sprites[range] {
+                        self.draw_subpixel_sprite(native_canvas, sprite, atlas)?;
+                    }
+                }
+                PrimitiveBatch::PolychromeSprites { range, .. } => {
+                    for sprite in &scene.polychrome_sprites[range] {
+                        self.draw_polychrome_sprite(native_canvas, sprite, atlas)?;
+                    }
+                }
+                PrimitiveBatch::Surfaces(_) => {}
+            }
         }
-        .map_err(|error| anyhow!("OH_Drawing_CanvasDrawRecordCmd failed: {error:?}"))?;
+        #[cfg(debug_assertions)]
+        let drawn_at = Instant::now();
 
         self.flush()?;
         #[cfg(debug_assertions)]
         {
             let elapsed = started_at.elapsed();
-            if elapsed >= Duration::from_millis(33) {
+            if elapsed >= Duration::from_millis(33) && self.frame_id.is_multiple_of(120) {
                 crate::log_message(
                     crate::LogLevel::Debug,
                     format!(
-                        "slow Native Drawing frame: total={elapsed:?}, record={:?}, replay+flush={:?}",
-                        recorded_at.duration_since(started_at),
-                        elapsed.saturating_sub(recorded_at.duration_since(started_at)),
+                        "slow Native Drawing frame: total={elapsed:?}, draw={:?}, flush={:?}",
+                        drawn_at.duration_since(started_at),
+                        elapsed.saturating_sub(drawn_at.duration_since(started_at)),
                     ),
                 );
             }
@@ -1215,81 +1187,6 @@ impl Drop for NativeDrawingSurface {
             gpu_context::OH_Drawing_GpuContextDestroy(self.gpu_context.as_ptr());
             release_native_object(NativeObjectKind::GpuContext);
         }
-    }
-}
-
-struct OwnedRecordCmdUtils(NonNull<OH_Drawing_RecordCmdUtils>);
-
-impl OwnedRecordCmdUtils {
-    fn new() -> Result<Self> {
-        // SAFETY: Creates a new independently owned recording utility.
-        NonNull::new(unsafe { record_cmd::OH_Drawing_RecordCmdUtilsCreate() })
-            .map(|native| track_native_object(NativeObjectKind::RecordUtils, Self(native)))
-            .ok_or_else(|| anyhow!("OH_Drawing_RecordCmdUtilsCreate returned null"))
-    }
-
-    fn begin(&self, width: u32, height: u32) -> Result<NonNull<OH_Drawing_Canvas>> {
-        let width = i32::try_from(width).context("recording canvas width does not fit in i32")?;
-        let height =
-            i32::try_from(height).context("recording canvas height does not fit in i32")?;
-        let mut canvas = std::ptr::null_mut();
-        // SAFETY: The utility is live, dimensions are the current non-zero
-        // surface size, and `canvas` is a valid output pointer.
-        unsafe {
-            record_cmd::OH_Drawing_RecordCmdUtilsBeginRecording(
-                self.0.as_ptr(),
-                width,
-                height,
-                &mut canvas,
-            )
-        }
-        .map_err(|error| anyhow!("OH_Drawing_RecordCmdUtilsBeginRecording failed: {error:?}"))?;
-        NonNull::new(canvas)
-            .ok_or_else(|| anyhow!("OH_Drawing_RecordCmdUtilsBeginRecording returned null canvas"))
-    }
-
-    fn finish(&self) -> Result<OwnedRecordCmd> {
-        let mut commands = std::ptr::null_mut();
-        // SAFETY: This completes the active recording begun on this utility,
-        // and `commands` is a valid output pointer.
-        unsafe {
-            record_cmd::OH_Drawing_RecordCmdUtilsFinishRecording(self.0.as_ptr(), &mut commands)
-        }
-        .map_err(|error| anyhow!("OH_Drawing_RecordCmdUtilsFinishRecording failed: {error:?}"))?;
-        NonNull::new(commands)
-            .map(|native| {
-                track_native_object(NativeObjectKind::RecordCommand, OwnedRecordCmd(native))
-            })
-            .ok_or_else(|| anyhow!("OH_Drawing_RecordCmdUtilsFinishRecording returned null"))
-    }
-}
-
-impl Drop for OwnedRecordCmdUtils {
-    fn drop(&mut self) {
-        // SAFETY: The recording utility is uniquely owned by this value.
-        if let Err(error) = unsafe { record_cmd::OH_Drawing_RecordCmdUtilsDestroy(self.0.as_ptr()) }
-        {
-            crate::log_message(
-                crate::LogLevel::Error,
-                format!("OH_Drawing_RecordCmdUtilsDestroy failed: {error:?}"),
-            );
-        }
-        release_native_object(NativeObjectKind::RecordUtils);
-    }
-}
-
-struct OwnedRecordCmd(NonNull<OH_Drawing_RecordCmd>);
-
-impl Drop for OwnedRecordCmd {
-    fn drop(&mut self) {
-        // SAFETY: The command list is uniquely owned by this value.
-        if let Err(error) = unsafe { record_cmd::OH_Drawing_RecordCmdDestroy(self.0.as_ptr()) } {
-            crate::log_message(
-                crate::LogLevel::Error,
-                format!("OH_Drawing_RecordCmdDestroy failed: {error:?}"),
-            );
-        }
-        release_native_object(NativeObjectKind::RecordCommand);
     }
 }
 

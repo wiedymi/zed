@@ -52,7 +52,15 @@ fn packaged_ssh_executable(name: &str) -> PathBuf {
 
 fn new_ssh_command(name: &str) -> util::command::Command {
     #[cfg(target_env = "ohos")]
-    return util::command::new_command(packaged_ssh_executable(name));
+    {
+        let mut command = util::command::new_command(packaged_ssh_executable(name));
+        command
+            .env("HOME", paths::data_dir())
+            .env("USER", "zed")
+            .env("LOGNAME", "zed")
+            .env("SHELL", util::shell::get_system_shell());
+        return command;
+    }
     #[cfg(not(target_env = "ohos"))]
     return util::command::new_command(name);
 }

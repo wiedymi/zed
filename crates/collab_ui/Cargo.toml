@@ -13,8 +13,10 @@ path = "src/collab_ui.rs"
 doctest = false
 
 [features]
-default = []
+default = ["media"]
+media = ["call/media", "dep:livekit_client"]
 test-support = [
+    "media",
     "call/test-support",
     "client/test-support",
     "collections/test-support",
@@ -30,7 +32,7 @@ test-support = [
 
 [dependencies]
 anyhow.workspace = true
-call.workspace = true
+call = { path = "../call", default-features = false }
 channel.workspace = true
 client.workspace = true
 collections.workspace = true
@@ -39,7 +41,7 @@ editor.workspace = true
 futures.workspace = true
 fuzzy.workspace = true
 gpui.workspace = true
-livekit_client.workspace = true
+livekit_client = { workspace = true, optional = true }
 menu.workspace = true
 notifications.workspace = true
 picker.workspace = true

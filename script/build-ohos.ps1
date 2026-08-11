@@ -58,6 +58,7 @@ $GitBundleStamp = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\git-ohos.patch.
 $GitPatch = Join-Path $RepositoryRoot 'crates\zed_ohos\hnp\git-ohos.patch'
 $OpenSshBundle = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\openssh-ohos.tar'
 $OpenSshBundleStamp = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\openssh-ohos.inputs.sha256'
+$OpenSshPatch = Join-Path $RepositoryRoot 'crates\zed_ohos\hnp\openssh-ohos.patch'
 $AskpassSource = Join-Path $RepositoryRoot 'crates\zed_ohos\hnp\zed-askpass.c'
 $NodeBundle = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\node-ohos.tar'
 $NodeBundleStamp = Join-Path $RepositoryRoot 'target\zed-ohos-hnp\node-ohos.inputs.sha256'
@@ -72,7 +73,7 @@ $GitSourceCommit = 'c44beea485f0f2feaf460e2ac87fdd5608d63cf0'
 $CurlSourceCommit = 'cfbfb65047e85e6b08af65fe9cdbcf68e9ad496a'
 $OpenSslSourceCommit = '0893a62353583343eb712adef6debdfbe597c227'
 $OpenSshSourceCommit = 'e8dd756725e8800fcd0b3fd71ee6b4382d1e8fab'
-$OpenSshBuildRevision = '1'
+$OpenSshBuildRevision = '2'
 $NodeVersion = '22.23.2'
 $NodeSourceCommit = 'aa4c77582be995286fc6e00aaf530dc7ade102a9'
 $NodeBuildRevision = '2'
@@ -306,11 +307,13 @@ tar -C /tmp/git-stage -cf /work/target/zed-ohos-hnp/git-ohos.tar .
 
 function Build-HnpOpenSsh {
     $CompilerHash = (Get-FileHash -LiteralPath $ToyboxCompiler -Algorithm SHA256).Hash
+    $PatchHash = (Get-FileHash -LiteralPath $OpenSshPatch -Algorithm SHA256).Hash
     $ExpectedInputStamp = @(
         $OpenSshBuildRevision,
         $OpenSshSourceCommit,
         $OpenSslSourceCommit,
-        $CompilerHash
+        $CompilerHash,
+        $PatchHash
     ) -join "`n"
     $CachedInputStamp = if (Test-Path -LiteralPath $OpenSshBundleStamp -PathType Leaf) {
         (Get-Content -LiteralPath $OpenSshBundleStamp -Raw).Trim()
@@ -345,6 +348,7 @@ git -C /tmp/openssh remote add origin https://github.com/openssh/openssh-portabl
 git -C /tmp/openssh fetch --quiet --depth 1 origin $OpenSshSourceCommit
 git -C /tmp/openssh checkout --quiet FETCH_HEAD
 test "`$(git -C /tmp/openssh rev-parse HEAD)" = "$OpenSshSourceCommit"
+git -C /tmp/openssh apply /work/crates/zed_ohos/hnp/openssh-ohos.patch
 cd /tmp/openssh
 autoreconf -fi >/dev/null
 ac_cv_header_linux_if_tun_h=no \
@@ -589,6 +593,7 @@ function Build-Hnp {
         $ToyboxConfig,
         $ToyboxCompiler,
         $GitPatch,
+        $OpenSshPatch,
         $AskpassSource,
         $NodePatch,
         $NodeToolSource,

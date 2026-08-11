@@ -18,17 +18,18 @@ desktop = [
     "dep:audio",
     "dep:auto_update",
     "dep:auto_update_ui",
-    "dep:call",
-    "dep:collab_ui",
+    "collaboration",
+    "call/media",
+    "collab_ui/media",
     "dep:crashes",
     "dep:gpui_platform",
     "dep:install_cli",
-    "git_ui/call",
     "gpui_platform/font-kit",
     "gpui_platform/screen-capture",
     "gpui_platform/wayland",
     "gpui_platform/x11",
 ]
+collaboration = ["dep:call", "dep:collab_ui", "git_ui/call"]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -100,14 +101,14 @@ audio = { workspace = true, optional = true }
 auto_update = { workspace = true, optional = true }
 auto_update_ui = { workspace = true, optional = true }
 breadcrumbs.workspace = true
-call = { workspace = true, optional = true }
+call = { path = "../call", optional = true, default-features = false }
 chrono.workspace = true
 channel.workspace = true
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
 codestral.workspace = true
-collab_ui = { workspace = true, optional = true }
+collab_ui = { path = "../collab_ui", optional = true, default-features = false }
 collections.workspace = true
 command_palette.workspace = true
 component.workspace = true

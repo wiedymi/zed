@@ -55,13 +55,22 @@ function publishWindowState(windowId: number, targetWindow: window.Window): void
   }
   try {
     const rect = targetWindow.getWindowProperties().windowRect;
-    const status = targetWindow.getWindowStatus();
+    let maximized = false;
+    let fullscreen = false;
+    try {
+      const status = targetWindow.getWindowStatus();
+      maximized = status === window.WindowStatusType.MAXIMIZE;
+      fullscreen = status === window.WindowStatusType.FULL_SCREEN;
+    } catch (_) {
+      // A newly created main window can report no status before its first show.
+      // Its rectangle is still valid and is needed to center auxiliary windows.
+    }
     handler(
       windowId,
       rect.left,
       rect.top,
-      status === window.WindowStatusType.MAXIMIZE,
-      status === window.WindowStatusType.FULL_SCREEN
+      maximized,
+      fullscreen
     );
   } catch (error) {
     hilog.error(
@@ -175,6 +184,7 @@ async function createAuxiliaryWindow(
     await createdWindow.loadContent('pages/Auxiliary', storage);
     await createdWindow.setWindowTitle(title);
     await createdWindow.resize(width, height);
+    await createdWindow.moveWindowTo(left, top);
     await createdWindow.showWindow();
     observeWindow(windowId, createdWindow);
     return createdWindow;

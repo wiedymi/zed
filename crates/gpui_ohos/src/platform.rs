@@ -8,6 +8,7 @@ use std::{
     ptr::NonNull,
     rc::{Rc, Weak},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -691,6 +692,8 @@ impl OhosPlatform {
                         LogLevel::Error,
                         format!("failed to apply the pending surface resize: {error:#}"),
                     );
+                    self.request_frame();
+                    continue;
                 }
             }
             let mut callback = {
@@ -797,7 +800,11 @@ impl OhosPlatform {
                     if !state.maximized && !state.fullscreen {
                         state.windowed_bounds = state.bounds;
                     }
-                    (size, state.primary, state.callbacks.resize.take())
+                    (
+                        size,
+                        state.lifecycle.is_primary(),
+                        state.callbacks.resize.take(),
+                    )
                 })
             };
             if let Some((size, primary, mut callback)) = resize {
@@ -1194,7 +1201,7 @@ impl OhosPlatform {
             .find(|window| window.borrow().native_window_id == window_id)
             .cloned()
             .with_context(|| format!("unknown HarmonyOS auxiliary window {window_id}"))?;
-        if window.borrow().primary {
+        if window.borrow().lifecycle.is_primary() {
             bail!("the primary HarmonyOS window cannot be attached as an auxiliary window");
         }
         let component = xcomponent_by_id(&format!("zed-auxiliary-surface-{window_id}"))?;
@@ -1211,7 +1218,8 @@ impl OhosPlatform {
             .iter()
             .find(|window| {
                 let state = window.borrow();
-                !state.primary && state.native_window_id == window_id
+                state.lifecycle == NativeWindowLifecycle::AuxiliaryOpen
+                    && state.native_window_id == window_id
             })
             .cloned();
         let Some(window) = window else {
@@ -1222,8 +1230,15 @@ impl OhosPlatform {
         if let Some(callback) = should_close {
             window.borrow_mut().callbacks.should_close = Some(callback);
         }
-        if allowed && let Some(callback) = window.borrow_mut().callbacks.close.take() {
-            callback();
+        if allowed {
+            let close = {
+                let mut state = window.borrow_mut();
+                state.lifecycle = NativeWindowLifecycle::AuxiliaryClosing;
+                state.callbacks.close.take()
+            };
+            if let Some(callback) = close {
+                callback();
+            }
         }
     }
 
@@ -1242,7 +1257,7 @@ impl OhosPlatform {
             .find(|window| window.borrow().native_window_id == window_id)
             .cloned()
             .with_context(|| format!("unknown HarmonyOS window {window_id}"))?;
-        let mut moved = {
+        let (mut moved, display_bounds) = {
             let mut state = window.borrow_mut();
             let origin = point(
                 px(physical_left as f32 / state.scale_factor),
@@ -1256,8 +1271,14 @@ impl OhosPlatform {
             if !maximized && !fullscreen {
                 state.windowed_bounds.origin = origin;
             }
-            changed.then(|| state.callbacks.moved.take()).flatten()
+            (
+                changed.then(|| state.callbacks.moved.take()).flatten(),
+                state.lifecycle.is_primary().then_some(state.bounds),
+            )
         };
+        if let Some(bounds) = display_bounds {
+            self.display.bounds.replace(bounds);
+        }
         if let Some(callback) = moved.as_mut() {
             callback();
         }
@@ -1268,11 +1289,12 @@ impl OhosPlatform {
     }
 
     fn release_window(&self, window: &Rc<RefCell<WindowState>>) {
-        let (component, primary, window_id, title) = {
+        let (component, close_native_window, was_active, window_id, title) = {
             let state = window.borrow();
             (
                 state.component,
-                state.primary,
+                state.lifecycle == NativeWindowLifecycle::AuxiliaryOpen,
+                state.active,
                 state.native_window_id,
                 state.title.clone(),
             )
@@ -1283,7 +1305,7 @@ impl OhosPlatform {
         if let Some(component) = component {
             clear_event_handler(component);
         }
-        if !primary
+        if close_native_window
             && let Some(control_window) = self.control_window.borrow().as_ref().cloned()
             && let Err(error) = control_window(window_id, WINDOW_COMMAND_CLOSE, title, 0, 0, 0, 0)
         {
@@ -1291,6 +1313,43 @@ impl OhosPlatform {
                 LogLevel::Error,
                 format!("failed to close HarmonyOS window {window_id}: {error:#}"),
             );
+        }
+        if was_active {
+            let windows = self.windows.borrow().clone();
+            let replacement = windows.last().cloned();
+            for candidate in windows {
+                update_active(
+                    &candidate,
+                    replacement
+                        .as_ref()
+                        .is_some_and(|replacement| Rc::ptr_eq(&candidate, replacement)),
+                );
+            }
+            if let Some(replacement) = replacement {
+                let (replacement_id, replacement_title) = {
+                    let state = replacement.borrow();
+                    (state.native_window_id, state.title.clone())
+                };
+                if let Some(control_window) = self.control_window.borrow().as_ref().cloned()
+                    && let Err(error) = control_window(
+                        replacement_id,
+                        WINDOW_COMMAND_SHOW,
+                        replacement_title,
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+                {
+                    log_message(
+                        LogLevel::Error,
+                        format!(
+                            "failed to restore HarmonyOS window {replacement_id} after closing window {window_id}: {error:#}"
+                        ),
+                    );
+                }
+                self.request_frame();
+            }
         }
     }
 
@@ -1313,12 +1372,16 @@ impl OhosPlatform {
                     }
                     state.frame_requested = true;
                     let callback = state.callbacks.resize.take();
-                    (size, state.scale_factor, state.primary, callback)
+                    (
+                        size,
+                        state.scale_factor,
+                        state.lifecycle.is_primary(),
+                        callback,
+                    )
                 };
                 if primary {
-                    self.display
-                        .bounds
-                        .replace(Bounds::new(Point::default(), size));
+                    let origin = self.display.bounds.borrow().origin;
+                    self.display.bounds.replace(Bounds::new(origin, size));
                 }
                 #[cfg(debug_assertions)]
                 log_message(
@@ -1477,7 +1540,11 @@ impl Platform for OhosPlatform {
             handle,
             component: None,
             native_window_id: window_id,
-            primary,
+            lifecycle: if primary {
+                NativeWindowLifecycle::Primary
+            } else {
+                NativeWindowLifecycle::AuxiliaryOpen
+            },
             bounds: options.bounds,
             windowed_bounds: options.bounds,
             scale_factor: self.scale_factor.get(),
@@ -1486,6 +1553,7 @@ impl Platform for OhosPlatform {
             capslock: Capslock::default(),
             pressed_keys: HashSet::new(),
             pressed_mouse_button: None,
+            mouse_click_state: MouseClickState::default(),
             touch_mouse_id: None,
             input_handler: None,
             title: title.clone(),
@@ -1920,11 +1988,24 @@ struct WindowCallbacks {
     hit_test: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeWindowLifecycle {
+    Primary,
+    AuxiliaryOpen,
+    AuxiliaryClosing,
+}
+
+impl NativeWindowLifecycle {
+    fn is_primary(self) -> bool {
+        self == Self::Primary
+    }
+}
+
 struct WindowState {
     handle: AnyWindowHandle,
     component: Option<XComponentHandle>,
     native_window_id: u32,
-    primary: bool,
+    lifecycle: NativeWindowLifecycle,
     bounds: Bounds<Pixels>,
     windowed_bounds: Bounds<Pixels>,
     scale_factor: f32,
@@ -1933,6 +2014,7 @@ struct WindowState {
     capslock: Capslock,
     pressed_keys: HashSet<i32>,
     pressed_mouse_button: Option<MouseButton>,
+    mouse_click_state: MouseClickState,
     touch_mouse_id: Option<u64>,
     input_handler: Option<PlatformInputHandler>,
     title: String,
@@ -1950,6 +2032,54 @@ struct WindowState {
     atlas: Arc<OhosAtlas>,
     accessibility_callbacks: Option<A11yCallbacks>,
     accessibility: Option<AccessibilityAdapter>,
+}
+
+#[derive(Debug)]
+struct MouseClickState {
+    button: Option<MouseButton>,
+    position: Point<Pixels>,
+    pressed_at: Option<Instant>,
+    count: usize,
+}
+
+impl Default for MouseClickState {
+    fn default() -> Self {
+        Self {
+            button: None,
+            position: Point::default(),
+            pressed_at: None,
+            count: 0,
+        }
+    }
+}
+
+impl MouseClickState {
+    fn press(&mut self, button: MouseButton, position: Point<Pixels>) -> usize {
+        const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+        const MULTI_CLICK_DISTANCE: Pixels = px(5.0);
+
+        let displacement = self.position - position;
+        let continues_sequence = self.button == Some(button)
+            && self
+                .pressed_at
+                .is_some_and(|pressed_at| pressed_at.elapsed() <= MULTI_CLICK_INTERVAL)
+            && displacement.x.abs() <= MULTI_CLICK_DISTANCE
+            && displacement.y.abs() <= MULTI_CLICK_DISTANCE;
+
+        self.count = if continues_sequence {
+            self.count.saturating_add(1)
+        } else {
+            1
+        };
+        self.button = Some(button);
+        self.position = position;
+        self.pressed_at = Some(Instant::now());
+        self.count
+    }
+
+    fn current_count(&self) -> usize {
+        self.count.max(1)
+    }
 }
 
 struct OhosWindow(Rc<RefCell<WindowState>>);
@@ -2234,21 +2364,6 @@ impl PlatformWindow for OhosWindow {
         self.0.borrow_mut().callbacks.appearance_changed = Some(callback);
     }
     fn draw(&self, scene: &Scene) {
-        #[cfg(debug_assertions)]
-        log_message(
-            LogLevel::Debug,
-            format!(
-                "drawing scene: quads={} underlines={} monochrome={} subpixel={} polychrome={} shadows={} paths={} surfaces={}",
-                scene.quads.len(),
-                scene.underlines.len(),
-                scene.monochrome_sprites.len(),
-                scene.subpixel_sprites.len(),
-                scene.polychrome_sprites.len(),
-                scene.shadows.len(),
-                scene.paths.len(),
-                scene.surfaces.len(),
-            ),
-        );
         let (component, atlas) = {
             let state = self.0.borrow();
             (state.component, state.atlas.clone())
@@ -2696,25 +2811,35 @@ fn dispatch_mouse(window: &Rc<RefCell<WindowState>>, event: NativeMouseEvent) {
     let input = match event.action {
         1 => {
             let button = button.unwrap_or(MouseButton::Left);
-            window.borrow_mut().pressed_mouse_button = Some(button);
+            let (click_count, first_mouse) = {
+                let mut state = window.borrow_mut();
+                state.pressed_mouse_button = Some(button);
+                let first_mouse = !state.active;
+                let click_count = state.mouse_click_state.press(button, position);
+                (click_count, first_mouse)
+            };
             PlatformInput::MouseDown(MouseDownEvent {
                 button,
                 position,
                 modifiers,
-                click_count: 1,
-                first_mouse: !window.borrow().active,
+                click_count,
+                first_mouse,
             })
         }
         2 => {
-            let button = button
-                .or(window.borrow().pressed_mouse_button)
-                .unwrap_or(MouseButton::Left);
-            window.borrow_mut().pressed_mouse_button = None;
+            let (button, click_count) = {
+                let mut state = window.borrow_mut();
+                let button = button
+                    .or(state.pressed_mouse_button)
+                    .unwrap_or(MouseButton::Left);
+                state.pressed_mouse_button = None;
+                (button, state.mouse_click_state.current_count())
+            };
             PlatformInput::MouseUp(MouseUpEvent {
                 button,
                 position,
                 modifiers,
-                click_count: 1,
+                click_count,
             })
         }
         3 => PlatformInput::MouseMove(MouseMoveEvent {

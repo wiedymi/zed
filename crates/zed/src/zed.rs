@@ -43,7 +43,6 @@ use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
-use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::branch_diff::BranchDiffToolbar;
 use git_ui::commit_view::CommitViewToolbar;
@@ -372,7 +371,12 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
                 })
             })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = cx;
+        None
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_env = "ohos")))]
     {
         Some(cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
@@ -814,6 +818,7 @@ fn initialize_panels(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
+    let _ = product_platform;
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
@@ -822,43 +827,97 @@ fn initialize_panels(
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
+            panel_name: &'static str,
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
             workspace_handle: WeakEntity<Workspace>,
             mut cx: gpui::AsyncWindowContext,
         ) {
-            if let Some(panel) = panel_task.await.context("failed to load panel").log_err()
+            match panel_task
+                .await
+                .with_context(|| format!("failed to load {panel_name} panel"))
             {
-                workspace_handle
-                    .update_in(&mut cx, |workspace, window, cx| {
-                        workspace.add_panel(panel, window, cx);
-                    })
-                    .log_err();
+                Ok(panel) => {
+                    if let Err(error) = workspace_handle.update_in(
+                        &mut cx,
+                        |workspace, window, cx| workspace.add_panel(panel, window, cx),
+                    ) {
+                        report_panel_load_error(panel_name, &error, workspace_handle, &mut cx);
+                    }
+                }
+                Err(error) => {
+                    report_panel_load_error(panel_name, &error, workspace_handle, &mut cx);
+                }
             }
         }
 
         futures::join!(
-            add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
+            add_panel_when_ready(
+                "Project",
+                project_panel,
+                workspace_handle.clone(),
+                cx.clone()
+            ),
+            add_panel_when_ready(
+                "Outline",
+                outline_panel,
+                workspace_handle.clone(),
+                cx.clone()
+            ),
+            add_panel_when_ready(
+                "Terminal",
+                terminal_panel,
+                workspace_handle.clone(),
+                cx.clone()
+            ),
+            add_panel_when_ready("Git", git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready("Debug", debug_panel, workspace_handle.clone(), cx.clone()),
+            initialize_agent_panel_with_reporting(
+                workspace_handle.clone(),
+                cx.clone()
+            ),
         );
 
-        #[cfg(feature = "desktop")]
-        if product_platform == ProductPlatform::Desktop {
+        #[cfg(feature = "collaboration")]
+        {
             let channels_panel = collab_ui::collab_panel::CollabPanel::load(
                 workspace_handle.clone(),
                 cx.clone(),
             );
-            add_panel_when_ready(channels_panel, workspace_handle, cx).await;
+            add_panel_when_ready(
+                "Collaboration",
+                channels_panel,
+                workspace_handle,
+                cx.clone(),
+            )
+            .await;
         }
-
-        #[cfg(not(feature = "desktop"))]
-        let _ = product_platform;
 
         anyhow::Ok(())
     })
+}
+
+async fn initialize_agent_panel_with_reporting(
+    workspace_handle: WeakEntity<Workspace>,
+    mut cx: AsyncWindowContext,
+) {
+    if let Err(error) = initialize_agent_panel(workspace_handle.clone(), cx.clone()).await {
+        report_panel_load_error("Agent", &error, workspace_handle, &mut cx);
+    }
+}
+
+fn report_panel_load_error(
+    panel_name: &str,
+    error: &anyhow::Error,
+    workspace_handle: WeakEntity<Workspace>,
+    cx: &mut AsyncWindowContext,
+) {
+    let message = format!("Could not load the {panel_name} panel: {error:#}");
+    log::error!("{message}");
+    if let Err(show_error) = workspace_handle.update_in(cx, |workspace, _, cx| {
+        workspace.show_error(message, cx);
+    }) {
+        log::error!("Could not show the {panel_name} panel error: {show_error:#}");
+    }
 }
 
 fn setup_or_teardown_ai_panel<P: Panel>(
@@ -925,34 +984,55 @@ async fn initialize_agent_panel(
     workspace_handle: WeakEntity<Workspace>,
     mut cx: AsyncWindowContext,
 ) -> anyhow::Result<()> {
-    workspace_handle
-        .update_in(&mut cx, |workspace, window, cx| {
-            ensure_agent_panel_for_workspace(workspace, None, window, cx)
-        })?
-        .await?;
-
-    workspace_handle.update_in(&mut cx, |workspace, window, cx| {
-        cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {
-            ensure_agent_panel_for_workspace(workspace, None, window, cx).detach_and_log_err(cx);
-        })
-        .detach();
-
-        // Register the actions that are shared between `assistant` and `assistant2`.
-        //
-        // We need to do this here instead of within the individual `init`
-        // functions so that we only register the actions once.
-        //
-        // Once we ship `assistant2` we can push this back down into `agent::agent_panel::init`.
+    workspace_handle.update_in(&mut cx, |workspace, _window, _cx| {
+        // Register actions before the asynchronous panel restore. This keeps
+        // the menu useful on slower platforms and lets it load the panel on
+        // demand if startup restoration is still pending.
         if !cfg!(test) {
             workspace
-                .register_action(agent_ui::AgentPanel::toggle_focus)
+                .register_action(toggle_or_load_agent_panel)
                 .register_action(agent_ui::AgentPanel::focus)
                 .register_action(agent_ui::AgentPanel::toggle)
                 .register_action(agent_ui::InlineAssistant::inline_assist);
         }
     })?;
 
+    workspace_handle
+        .update_in(&mut cx, |workspace, window, cx| {
+            ensure_agent_panel_for_workspace(workspace, None, window, cx)
+        })?
+        .await?;
+
+    workspace_handle.update_in(&mut cx, |_workspace, window, cx| {
+        cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {
+            ensure_agent_panel_for_workspace(workspace, None, window, cx).detach_and_log_err(cx);
+        })
+        .detach();
+    })?;
+
     anyhow::Ok(())
+}
+
+fn toggle_or_load_agent_panel(
+    workspace: &mut Workspace,
+    _: &zed_actions::assistant::ToggleFocus,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if workspace.panel::<agent_ui::AgentPanel>(cx).is_some() {
+        workspace.toggle_panel_focus::<agent_ui::AgentPanel>(window, cx);
+        return;
+    }
+
+    let load = ensure_agent_panel_for_workspace(workspace, None, window, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        load.await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<agent_ui::AgentPanel>(window, cx);
+        })?;
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
 }
 
 fn register_actions(
@@ -962,8 +1042,11 @@ fn register_actions(
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    #[cfg(feature = "desktop")]
-    if product_platform == ProductPlatform::Desktop {
+    #[cfg(feature = "collaboration")]
+    if matches!(
+        product_platform,
+        ProductPlatform::Desktop | ProductPlatform::Ohos
+    ) {
         workspace.register_action(
             |workspace: &mut Workspace,
              _: &collab_ui::collab_panel::ToggleFocus,
@@ -974,7 +1057,7 @@ fn register_actions(
         );
     }
 
-    #[cfg(not(feature = "desktop"))]
+    #[cfg(not(feature = "collaboration"))]
     let _ = product_platform;
 
     #[cfg(feature = "desktop")]

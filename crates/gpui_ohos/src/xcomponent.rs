@@ -322,10 +322,13 @@ pub(crate) fn apply_pending_surface_resize(
         let Some((width, height)) = state.pending_resize.take() else {
             return Ok(None);
         };
-        if state.surface.size() == (width, height) {
+        if state.surface.size() == (width, height) && state.surface.is_available() {
             return Ok(None);
         }
-        state.surface.resize(width, height)?;
+        if let Err(error) = state.surface.resize(width, height) {
+            state.pending_resize = Some((width, height));
+            return Err(error);
+        }
         Ok(Some((width, height)))
     })
 }

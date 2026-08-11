@@ -1,33 +1,46 @@
-use crate::{
-    call_settings::CallSettings,
-    participant::{LocalParticipant, RemoteParticipant},
-};
+#[cfg(feature = "media")]
+use crate::call_settings::CallSettings;
+use crate::participant::{LocalParticipant, RemoteParticipant};
 use anyhow::{Context as _, Result, anyhow};
+#[cfg(feature = "media")]
 use audio::{Audio, Sound};
 use client::{
     ChannelId, Client, ParticipantIndex, TypedEnvelope, User, UserStore,
     proto::{self, PeerId},
 };
 use collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "media")]
 use feature_flags::FeatureFlagAppExt;
 use fs::Fs;
 use futures::StreamExt;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FutureExt as _,
-    ScreenCaptureSource, ScreenCaptureStream, Task, TaskExt, Timeout, WeakEntity,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FutureExt as _, Task, TaskExt,
+    Timeout, WeakEntity,
 };
+#[cfg(feature = "media")]
+use gpui::{ScreenCaptureSource, ScreenCaptureStream};
+#[cfg(feature = "media")]
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
+#[cfg(feature = "media")]
 use livekit::{LocalTrackPublication, ParticipantIdentity, RoomEvent};
+#[cfg(feature = "media")]
 use livekit_client::{self as livekit, AudioStream, TrackSid};
 use postage::{sink::Sink, stream::Stream, watch};
 use project::{CURRENT_PROJECT_FEATURES, Project};
+#[cfg(feature = "media")]
 use settings::Settings as _;
-use std::sync::atomic::AtomicU64;
-use std::{future::Future, mem, rc::Rc, sync::Arc, time::Duration, time::Instant};
+#[cfg(feature = "media")]
+use std::time::Instant;
+use std::{future::Future, mem, sync::Arc, time::Duration};
+#[cfg(feature = "media")]
+use std::{rc::Rc, sync::atomic::AtomicU64};
 
+#[cfg(feature = "media")]
 use super::diagnostics::CallDiagnostics;
-use util::{ResultExt, TryFutureExt, paths::PathStyle, post_inc};
+#[cfg(feature = "media")]
+use util::post_inc;
+use util::{ResultExt, TryFutureExt, paths::PathStyle};
 use workspace::ParticipantLocation;
 
 pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,12 +53,15 @@ pub enum Event {
     ParticipantLocationChanged {
         participant_id: proto::PeerId,
     },
+    #[cfg(feature = "media")]
     RemoteVideoTracksChanged {
         participant_id: proto::PeerId,
     },
+    #[cfg(feature = "media")]
     RemoteVideoTrackUnsubscribed {
         sid: TrackSid,
     },
+    #[cfg(feature = "media")]
     RemoteAudioTracksChanged {
         participant_id: proto::PeerId,
     },
@@ -66,14 +82,18 @@ pub enum Event {
     RoomLeft {
         channel_id: Option<ChannelId>,
     },
+    #[cfg(feature = "media")]
     LocalScreenShareStarted,
+    #[cfg(feature = "media")]
     LocalScreenShareStopped,
 }
 
 pub struct Room {
     id: u64,
     channel_id: Option<ChannelId>,
+    #[cfg(feature = "media")]
     live_kit: Option<LiveKitRoom>,
+    #[cfg(feature = "media")]
     diagnostics: Option<Entity<CallDiagnostics>>,
     status: RoomStatus,
     shared_projects: HashSet<WeakEntity<Project>>,
@@ -93,6 +113,7 @@ pub struct Room {
     room_update_completed_rx: watch::Receiver<Option<()>>,
     pending_room_update: Option<Task<()>>,
     maintain_connection: Option<Task<Option<()>>>,
+    #[cfg(feature = "media")]
     created: Instant,
 }
 
@@ -108,6 +129,10 @@ impl Room {
     }
 
     pub fn is_connected(&self, _: &App) -> bool {
+        #[cfg(not(feature = "media"))]
+        return self.status.is_online();
+
+        #[cfg(feature = "media")]
         if let Some(live_kit) = self.live_kit.as_ref() {
             live_kit.room.connection_state() == livekit::ConnectionState::Connected
         } else {
@@ -123,7 +148,10 @@ impl Room {
         user_store: Entity<UserStore>,
         cx: &mut Context<Self>,
     ) -> Self {
+        #[cfg(feature = "media")]
         spawn_room_connection(livekit_connection_info, cx);
+        #[cfg(not(feature = "media"))]
+        let _ = livekit_connection_info;
 
         let maintain_connection = cx.spawn({
             let client = client.clone();
@@ -134,6 +162,7 @@ impl Room {
             }
         });
 
+        #[cfg(feature = "media")]
         Audio::play_sound(Sound::Joined, cx);
 
         let (room_update_completed_tx, room_update_completed_rx) = watch::channel();
@@ -141,7 +170,9 @@ impl Room {
         Self {
             id,
             channel_id,
+            #[cfg(feature = "media")]
             live_kit: None,
+            #[cfg(feature = "media")]
             diagnostics: None,
             status: RoomStatus::Online,
             shared_projects: Default::default(),
@@ -166,6 +197,7 @@ impl Room {
             maintain_connection: Some(maintain_connection),
             room_update_completed_tx,
             room_update_completed_rx,
+            #[cfg(feature = "media")]
             created: cx.background_executor().now(),
         }
     }
@@ -274,6 +306,7 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     pub fn mute_on_join(cx: &App) -> bool {
         CallSettings::get_global(cx).mute_on_join || client::IMPERSONATE_LOGIN.is_some()
     }
@@ -313,6 +346,7 @@ impl Room {
 
     pub(crate) fn leave(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         cx.notify();
+        #[cfg(feature = "media")]
         self.emit_video_track_unsubscribed_events(cx);
         self.leave_internal(cx)
     }
@@ -323,6 +357,7 @@ impl Room {
         }
 
         log::info!("leaving room");
+        #[cfg(feature = "media")]
         Audio::play_sound(Sound::Leave, cx);
 
         self.clear_state(cx);
@@ -356,12 +391,15 @@ impl Room {
         self.pending_participants.clear();
         self.participant_user_ids.clear();
         self.client_subscriptions.clear();
+        #[cfg(feature = "media")]
         self.live_kit.take();
+        #[cfg(feature = "media")]
         self.diagnostics.take();
         self.pending_room_update.take();
         self.maintain_connection.take();
     }
 
+    #[cfg(feature = "media")]
     fn emit_video_track_unsubscribed_events(&self, cx: &mut Context<Self>) {
         for participant in self.remote_participants.values() {
             for sid in participant.video_tracks.keys() {
@@ -538,6 +576,7 @@ impl Room {
         self.id
     }
 
+    #[cfg(feature = "media")]
     pub fn room_id(&self) -> impl Future<Output = Option<String>> + 'static {
         let room = self.live_kit.as_ref().map(|lk| lk.room.clone());
         async move {
@@ -548,6 +587,7 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     pub fn get_stats(&self, cx: &App) -> Task<Option<livekit::SessionStats>> {
         match self.live_kit.as_ref() {
             Some(lk) => {
@@ -559,6 +599,7 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     pub fn input_lag(&self) -> Option<Duration> {
         let us = self
             .live_kit
@@ -573,10 +614,12 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     pub fn diagnostics(&self) -> Option<&Entity<CallDiagnostics>> {
         self.diagnostics.as_ref()
     }
 
+    #[cfg(feature = "media")]
     pub fn connection_quality(&self) -> livekit::ConnectionQuality {
         self.live_kit
             .as_ref()
@@ -780,6 +823,7 @@ impl Room {
                                 }
                             }
                             this.local_participant.projects.clear();
+                            #[cfg(feature = "media")]
                             if let Some(livekit_room) = &mut this.live_kit {
                                 livekit_room.stop_publishing(cx);
                             }
@@ -798,6 +842,7 @@ impl Room {
                     this.local_participant.projects.clear();
                 }
 
+                #[cfg(feature = "media")]
                 let livekit_participants = this
                     .live_kit
                     .as_ref()
@@ -884,7 +929,9 @@ impl Room {
                                     role,
                                     muted: true,
                                     speaking: false,
+                                    #[cfg(feature = "media")]
                                     video_tracks: Default::default(),
+                                    #[cfg(feature = "media")]
                                     audio_tracks: Default::default(),
                                 },
                             );
@@ -892,6 +939,7 @@ impl Room {
                             // When joining a room start_room_connection gets
                             // called but we have already played the join sound.
                             // Dont play extra sounds over that.
+                            #[cfg(feature = "media")]
                             if this.created.elapsed() > Duration::from_millis(100) {
                                 if let proto::ChannelRole::Guest = role {
                                     Audio::play_sound(Sound::GuestJoined, cx);
@@ -901,6 +949,7 @@ impl Room {
                                 }
                             }
 
+                            #[cfg(feature = "media")]
                             if let Some(livekit_participants) = &livekit_participants
                                 && let Some(livekit_participant) = livekit_participants
                                     .get(&ParticipantIdentity(user.legacy_id.to_string()))
@@ -933,13 +982,18 @@ impl Room {
                                     project_id: project.id,
                                 });
                             }
-                            for sid in participant.video_tracks.keys() {
-                                cx.emit(Event::RemoteVideoTrackUnsubscribed { sid: sid.clone() });
-                            }
-                            if !participant.video_tracks.is_empty() {
-                                cx.emit(Event::RemoteVideoTracksChanged {
-                                    participant_id: participant.peer_id,
-                                });
+                            #[cfg(feature = "media")]
+                            {
+                                for sid in participant.video_tracks.keys() {
+                                    cx.emit(Event::RemoteVideoTrackUnsubscribed {
+                                        sid: sid.clone(),
+                                    });
+                                }
+                                if !participant.video_tracks.is_empty() {
+                                    cx.emit(Event::RemoteVideoTracksChanged {
+                                        participant_id: participant.peer_id,
+                                    });
+                                }
                             }
                             false
                         }
@@ -997,6 +1051,7 @@ impl Room {
         })
     }
 
+    #[cfg(feature = "media")]
     fn livekit_room_updated(&mut self, event: RoomEvent, cx: &mut Context<Self>) -> Result<()> {
         log::trace!(
             "client {:?}. livekit event: {:?}",
@@ -1336,12 +1391,20 @@ impl Room {
     }
 
     pub fn is_sharing_screen(&self) -> bool {
+        #[cfg(not(feature = "media"))]
+        return false;
+
+        #[cfg(feature = "media")]
         self.live_kit
             .as_ref()
             .is_some_and(|live_kit| !matches!(live_kit.screen_track, LocalTrack::None))
     }
 
     pub fn shared_screen_id(&self) -> Option<u64> {
+        #[cfg(not(feature = "media"))]
+        return None;
+
+        #[cfg(feature = "media")]
         self.live_kit.as_ref().and_then(|lk| match lk.screen_track {
             LocalTrack::Published { ref _stream, .. } => {
                 _stream.metadata().ok().map(|meta| meta.id)
@@ -1351,12 +1414,20 @@ impl Room {
     }
 
     pub fn is_sharing_mic(&self) -> bool {
+        #[cfg(not(feature = "media"))]
+        return false;
+
+        #[cfg(feature = "media")]
         self.live_kit
             .as_ref()
             .is_some_and(|live_kit| !matches!(live_kit.microphone_track, LocalTrack::None))
     }
 
     pub fn is_muted(&self) -> bool {
+        #[cfg(not(feature = "media"))]
+        return false;
+
+        #[cfg(feature = "media")]
         self.live_kit.as_ref().is_some_and(|live_kit| {
             matches!(live_kit.microphone_track, LocalTrack::None)
                 || live_kit.muted_by_user
@@ -1365,18 +1436,30 @@ impl Room {
     }
 
     pub fn muted_by_user(&self) -> bool {
+        #[cfg(not(feature = "media"))]
+        return false;
+
+        #[cfg(feature = "media")]
         self.live_kit
             .as_ref()
             .is_some_and(|live_kit| live_kit.muted_by_user)
     }
 
     pub fn is_speaking(&self) -> bool {
+        #[cfg(not(feature = "media"))]
+        return false;
+
+        #[cfg(feature = "media")]
         self.live_kit
             .as_ref()
             .is_some_and(|live_kit| live_kit.speaking)
     }
 
     pub fn is_deafened(&self) -> Option<bool> {
+        #[cfg(not(feature = "media"))]
+        return None;
+
+        #[cfg(feature = "media")]
         self.live_kit.as_ref().map(|live_kit| live_kit.deafened)
     }
 
@@ -1398,6 +1481,7 @@ impl Room {
     }
 
     #[track_caller]
+    #[cfg(feature = "media")]
     pub fn share_microphone(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         if self.status.is_offline() {
             return Task::ready(Err(anyhow!("room is offline")));
@@ -1473,6 +1557,7 @@ impl Room {
         })
     }
 
+    #[cfg(feature = "media")]
     pub fn share_screen(
         &mut self,
         source: Rc<dyn ScreenCaptureSource>,
@@ -1545,7 +1630,7 @@ impl Room {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "media", target_os = "linux"))]
     pub fn share_screen_wayland(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         log::info!("will screenshare on wayland");
         if self.status.is_offline() {
@@ -1623,6 +1708,7 @@ impl Room {
         })
     }
 
+    #[cfg(feature = "media")]
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         if let Some(live_kit) = self.live_kit.as_mut() {
             // When unmuting, undeafen if the user was deafened before.
@@ -1649,6 +1735,7 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     pub fn toggle_deafen(&mut self, cx: &mut Context<Self>) {
         if let Some(live_kit) = self.live_kit.as_mut() {
             // When deafening, mute the microphone if it was not already muted.
@@ -1665,6 +1752,7 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     pub fn unshare_screen(&mut self, play_sound: bool, cx: &mut Context<Self>) -> Result<()> {
         anyhow::ensure!(!self.status.is_offline(), "room is offline");
 
@@ -1699,6 +1787,7 @@ impl Room {
         }
     }
 
+    #[cfg(feature = "media")]
     fn set_deafened(&mut self, deafened: bool, cx: &mut Context<Self>) -> Option<()> {
         {
             let live_kit = self.live_kit.as_mut()?;
@@ -1715,6 +1804,7 @@ impl Room {
         None
     }
 
+    #[cfg(feature = "media")]
     fn set_mute(&mut self, should_mute: bool, cx: &mut Context<Room>) -> Option<Task<Result<()>>> {
         let live_kit = self.live_kit.as_mut()?;
         cx.notify();
@@ -1751,6 +1841,7 @@ impl Room {
     }
 }
 
+#[cfg(feature = "media")]
 fn spawn_room_connection(
     livekit_connection_info: Option<proto::LiveKitConnectionInfo>,
     cx: &mut Context<Room>,
@@ -1810,6 +1901,7 @@ fn spawn_room_connection(
     }
 }
 
+#[cfg(feature = "media")]
 struct LiveKitRoom {
     room: Rc<livekit::Room>,
     screen_track: LocalTrack<dyn ScreenCaptureStream>,
@@ -1825,6 +1917,7 @@ struct LiveKitRoom {
     _handle_updates: Task<()>,
 }
 
+#[cfg(feature = "media")]
 impl LiveKitRoom {
     fn stop_publishing(&mut self, cx: &mut Context<Room>) {
         let mut tracks_to_unpublish = Vec::new();
@@ -1855,6 +1948,7 @@ impl LiveKitRoom {
     }
 }
 
+#[cfg(feature = "media")]
 #[derive(Default)]
 enum LocalTrack<Stream: ?Sized> {
     #[default]

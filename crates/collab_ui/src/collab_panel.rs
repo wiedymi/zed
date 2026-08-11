@@ -41,14 +41,16 @@ use ui::{
 };
 use util::{ResultExt, TryFutureExt, maybe};
 use workspace::{
-    AutoWatch, CopyRoomId, Deafen, LeaveCall, MultiWorkspace, Mute, OpenChannelNotes,
-    OpenChannelNotesById, ScreenShare, ShareProject, Workspace,
+    AutoWatch, LeaveCall, MultiWorkspace, OpenChannelNotes, OpenChannelNotesById, ShareProject,
+    Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{
         DetachAndPromptErr, Notification as WorkspaceNotification, NotificationId, NotifyResultExt,
         SuppressEvent,
     },
 };
+#[cfg(feature = "media")]
+use workspace::{CopyRoomId, Deafen, Mute, ScreenShare};
 
 const FILTER_OCCUPIED_CHANNELS_KEY: &str = "filter_occupied_channels";
 const FAVORITE_CHANNELS_KEY: &str = "favorite_channels";
@@ -143,13 +145,17 @@ pub fn init(cx: &mut App) {
                 ChannelView::open(channel_id, None, workspace, window, cx).detach_and_log_err(cx)
             });
         });
-        // TODO: make it possible to bind this one to a held key for push to talk?
-        // how to make "toggle_on_modifiers_press" contextual?
-        workspace.register_action(|_, _: &Mute, _, cx| title_bar::collab::toggle_mute(cx));
-        workspace.register_action(|_, _: &Deafen, _, cx| title_bar::collab::toggle_deafen(cx));
+        #[cfg(feature = "media")]
+        {
+            // TODO: make it possible to bind this one to a held key for push to talk?
+            // how to make "toggle_on_modifiers_press" contextual?
+            workspace.register_action(|_, _: &Mute, _, cx| title_bar::collab::toggle_mute(cx));
+            workspace.register_action(|_, _: &Deafen, _, cx| title_bar::collab::toggle_deafen(cx));
+        }
         workspace.register_action(|_, _: &LeaveCall, window, cx| {
             CollabPanel::leave_call(window, cx);
         });
+        #[cfg(feature = "media")]
         workspace.register_action(|workspace, _: &CopyRoomId, window, cx| {
             use workspace::notifications::{NotificationId, NotifyTaskExt as _};
 
@@ -194,6 +200,7 @@ pub fn init(cx: &mut App) {
             });
         });
         // TODO(jk): Is this action ever triggered?
+        #[cfg(feature = "media")]
         workspace.register_action(|_, _: &ScreenShare, window, cx| {
             let room = ActiveCall::global(cx).read(cx).room().cloned();
             if let Some(room) = room {
@@ -1412,6 +1419,7 @@ impl CollabPanel {
         }
 
         let context_menu = ContextMenu::build(window, cx, |mut context_menu, window, _| {
+            #[cfg(feature = "media")]
             if role == proto::ChannelRole::Guest {
                 context_menu = context_menu.entry(
                     "Grant Mic Access",
@@ -1467,7 +1475,7 @@ impl CollabPanel {
                 );
             }
             if role == proto::ChannelRole::Member || role == proto::ChannelRole::Talker {
-                let label = if role == proto::ChannelRole::Talker {
+                let label = if cfg!(feature = "media") && role == proto::ChannelRole::Talker {
                     "Mute"
                 } else {
                     "Revoke Access"
@@ -2985,7 +2993,11 @@ impl CollabPanel {
                 if let Some(name) = channel_name {
                     name
                 } else {
-                    SharedString::from("Current Call")
+                    SharedString::from(if cfg!(feature = "media") {
+                        "Current Call"
+                    } else {
+                        "Current Session"
+                    })
                 }
             }
             Section::FavoriteChannels => SharedString::from("Favorites"),
@@ -3015,35 +3027,41 @@ impl CollabPanel {
                                 .tooltip_label("Copy Channel Link"),
                         )
                     })
-                    .child(
-                        IconButton::new(
-                            "auto-watch-screens",
-                            if is_auto_watching {
-                                IconName::Eye
-                            } else {
-                                IconName::EyeOff
-                            },
+                    .when(cfg!(feature = "media"), |this| {
+                        this.child(
+                            IconButton::new(
+                                "auto-watch-screens",
+                                if is_auto_watching {
+                                    IconName::Eye
+                                } else {
+                                    IconName::EyeOff
+                                },
+                            )
+                            .icon_size(IconSize::Small)
+                            .toggle_state(is_auto_watching)
+                            .selected_style(match auto_watch_state {
+                                AutoWatch::Paused => ButtonStyle::Tinted(TintColor::Warning),
+                                _ => ButtonStyle::Tinted(TintColor::Accent),
+                            })
+                            .when(!is_auto_watching, |this| {
+                                this.visible_on_hover("section-header")
+                            })
+                            .tooltip(Tooltip::text(match auto_watch_state {
+                                AutoWatch::Paused => "Auto Watch Screens (paused while sharing)",
+                                AutoWatch::Active { .. } => "Stop Auto Watching Screens",
+                                AutoWatch::Off => "Auto Watch Screens",
+                            }))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.workspace
+                                        .update(cx, |workspace, cx| {
+                                            workspace.toggle_auto_watch(window, cx)
+                                        })
+                                        .ok();
+                                },
+                            )),
                         )
-                        .icon_size(IconSize::Small)
-                        .toggle_state(is_auto_watching)
-                        .selected_style(match auto_watch_state {
-                            AutoWatch::Paused => ButtonStyle::Tinted(TintColor::Warning),
-                            _ => ButtonStyle::Tinted(TintColor::Accent),
-                        })
-                        .when(!is_auto_watching, |this| {
-                            this.visible_on_hover("section-header")
-                        })
-                        .tooltip(Tooltip::text(match auto_watch_state {
-                            AutoWatch::Paused => "Auto Watch Screens (paused while sharing)",
-                            AutoWatch::Active { .. } => "Stop Auto Watching Screens",
-                            AutoWatch::Off => "Auto Watch Screens",
-                        }))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.workspace
-                                .update(cx, |workspace, cx| workspace.toggle_auto_watch(window, cx))
-                                .ok();
-                        })),
-                    )
+                    })
                     .into_any_element(),
             ),
             Section::Contacts => Some(

@@ -22,9 +22,11 @@ acp_tools.workspace = true
 agent_ui.workspace = true
 assets.workspace = true
 client.workspace = true
+call = { path = "../call", default-features = false }
 channel.workspace = true
 clock.workspace = true
 command_palette.workspace = true
+collab_ui = { path = "../collab_ui", default-features = false }
 copilot_chat.workspace = true
 copilot_ui.workspace = true
 csv_preview.workspace = true
@@ -116,7 +118,7 @@ which_key.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 zed_credentials_provider.workspace = true
-zed_product.workspace = true
+zed_product = { workspace = true, features = ["collaboration"] }
 worktree.workspace = true
 
 [build-dependencies]
