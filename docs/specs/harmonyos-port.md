@@ -1,6 +1,6 @@
 # Spec: Porting Zed to HarmonyOS NEXT / OpenHarmony
 
-**Status:** The audited repository gaps have implementations. The 2026-08-11 `release-fast` HAP builds, signs, and installs in the API 24 emulator. The latest native-window close and centering, Settings persistence, Agent and Collaboration panel, OpenSSH identity, direct-rendering, icon, and double-click changes still need runtime checks.
+**Status:** The audited repository gaps have implementations. The 2026-08-11 `release-fast` HAP builds, signs, and installs in the API 24 emulator. The newest package opens the production Agent panel on OHOS, stops failed surface-resize retries after an auxiliary window closes, adapts every client-side OpenSSH UID lookup, and preserves prompt button semantics in the native ArkUI dialog. These changes still need runtime checks.
 
 **Author:** wiedymi
 
@@ -34,8 +34,9 @@ The port is past the scaffold stage. The installed HAP boots the real
 `editor::Editor` over a local `project::Project`, attaches production panels,
 renders GPUI scenes through Native Drawing, accepts native XComponent input,
 and automatically saves the sandbox document. Project, Outline, Git, and
-Terminal panel use is verified. The latest Agent and Collaboration panel paths
-are installed, but they still need a runtime check.
+Terminal panel use is verified. The Agent panel now opens when each OHOS
+workspace loads. The latest Agent and Collaboration panel paths are installed,
+but they still need a runtime check.
 
 | Capability | Current state |
 |---|---|
@@ -48,11 +49,11 @@ are installed, but they still need a runtime check.
 | Persistence | Real sandbox file save and reopen working through `BufferStore` |
 | Clipboard | HarmonyOS system pasteboard read/write working; on-device round trip verified and pasteboard permission handled by `EntryAbility` |
 | Credentials | HarmonyOS Asset Store read/write/delete working with persistent, encrypted records; restart survival and deletion verified on-device |
-| Agent/network UI | Production Agent panel, language-model/provider initialization, ACP tools, web-search providers, prompt store, and real Reqwest HTTP client are enabled. The Agent action is now registered before asynchronous panel restore. If the panel is absent, the action creates it and then gives it focus. This path needs a runtime check. Provider use still requires normal account or API configuration. |
-| App menu/system bridges | In-window Zed/File/Edit/Selection/View/Go/Run/Help menus use production actions. View includes the Agent and Collaboration panel actions. Settings and later GPUI windows use non-modal ArkUI subwindows with independent XComponents, surfaces, atlases, input, and close lifecycle. A runtime log found a re-entrant `RefCell` borrow when an auxiliary window closed; the close callback now runs after the state borrow ends. The app now creates its configuration directory before Settings or a language server uses it. ArkUI applies the requested auxiliary size and position before show. OHOS uses explicit application quit, and closing an active auxiliary window restores the previous native window. The icon uses the real Zed mark with a larger safe area. These changes still need runtime checks. |
+| Agent/network UI | Production Agent panel, language-model/provider initialization, ACP tools, web-search providers, prompt store, and real Reqwest HTTP client are enabled. The Agent action is registered before asynchronous panel restore. If the panel is absent, the action creates it before it gives it focus. OHOS also opens the loaded production panel so its presence is visible without a hidden action. This path needs a runtime check. Provider use still requires normal account or API configuration. |
+| App menu/system bridges | In-window Zed/File/Edit/Selection/View/Go/Run/Help menus use production actions. View includes the Agent and Collaboration panel actions. Settings and later GPUI windows use non-modal ArkUI subwindows with independent XComponents, surfaces, atlases, input, and close lifecycle. The close callback runs outside the window-state borrow. A failed resize no longer requeues itself after ArkUI destroys an auxiliary surface; the backend marks that surface unavailable until a new native lifecycle event recreates it. The app creates its configuration directory before Settings or a language server uses it. ArkUI applies the requested auxiliary size and position before show. OHOS uses explicit application quit, and closing an active auxiliary window restores the previous native window. Native prompts retain GPUI answer indices while ArkUI applies native cancel-first ordering and primary-button style. The icon uses the real Zed mark with a larger safe area. These changes still need runtime checks. |
 | External workspaces | `DocumentViewPicker` selection, persistent URI permission, native FileShare URI-to-path resolution, restart restoration, public workspace access, and live folder-to-folder switching with complete workspace docks work on-device. The old OHOS same-window workaround has been removed: Open Folder honors Zed's configured new-window behavior, Open Files and clone's “Open repo in new project” use normal distinct GPUI/native windows. The generalized paths are cross-built and packaged; fresh multi-window runtime coverage is pending. |
 | Drag and drop | ArkUI UDMF file/folder/file-URI records are accepted on main and auxiliary XComponents, resolved through native FileShare URI conversion, and emitted as GPUI `FileDropEvent` enter/move/leave/submit/end sequences. GPUI outbound file/folder drags use ArkUI `executeDrag`, UDMF `File`/`Folder` records, file URIs, and a native preview. Cross-built and packaged; fresh on-device coverage is pending. |
-| Process-backed UI | A private `zedtools` HNP supplies Dash, Toybox 0.8.11, Git 2.51.0, Node.js 22.23.2/npm, OpenSSH 10.4p1 clients, and a native askpass bridge. Terminal pipes, Git init/status/config/add/commit/log, HTTPS `ls-remote`, and shallow clone are verified on-device. PTY creation is denied by the HAP SELinux domain, so terminals use pipes. HarmonyOS app UIDs have no `/etc/passwd` entry, so the packaged OpenSSH client now supplies a local client identity from `HOME`, `USER`, `LOGNAME`, and `SHELL`. The remote login name still comes from the SSH destination or settings. The adapter cross-builds and is packaged; a real SSH connection still needs a runtime check. |
+| Process-backed UI | A private `zedtools` HNP supplies Dash, Toybox 0.8.11, Git 2.51.0, Node.js 22.23.2/npm, OpenSSH 10.4p1 clients, and a native askpass bridge. Terminal pipes, Git init/status/config/add/commit/log, HTTPS `ls-remote`, and shallow clone are verified on-device. PTY creation is denied by the HAP SELinux domain, so terminals use pipes. HarmonyOS app UIDs have no `/etc/passwd` entry. One OpenSSH adapter now checks the system database and supplies the current local client identity from `HOME`, `USER`, `LOGNAME`, and `SHELL` when that lookup fails. The shared `misc.c` tilde, subprocess, and home-directory paths use the same adapter, so `ssh`, `scp`, and `sftp` do not fall back to an unpatched UID lookup. The remote login name still comes from the SSH destination or settings. The clients cross-build and are packaged; a real SSH connection still needs a runtime check. |
 | Language servers | Built-in grammars and language adapters are registered. The rebuilt Node.js 22.23.2/npm HNP with the Tailwind Unicode-regexp and ESLint `openharmony` packaging adaptations is built, packaged, and installed; its Node executable is a validated x86_64 OHOS PIE linked only to OHOS libc/libc++. vtsls launched with the earlier package. Tailwind, ESLint, and complete diagnostics are not recorded as fixed until this newly installed package is exercised on-device. |
 | Platform work still pending | Runtime acceptance for Oklab output, accessibility, crash events, appearance/thermal changes, incoming Wants, outbound drag, extension/DAP download rejection, SSH/general windows, complete Node/LSP/tasks, lifecycle/surface loss, and public-file semantics. App updates, media/calls/screen share, PTY permission, physical hardware, and dual distribution remain external gates. |
 
@@ -94,7 +95,7 @@ A successful cross-build does not mean that the feature works at runtime.
 | Product and workspace startup | `NeedsRuntime` | Desktop Zed and `zed_ohos` now use the `zed_product` library for workspace observation, panels, status items, toolbars, quick actions, panel restore, and actions. The full OHOS graph links; repeat new-folder/new-window runtime tests with the new bootstrap. |
 | App menus and global actions | `NeedsRuntime` | OHOS builds menus from `zed_product::app_menus`. Agent and Collaboration panel actions are present. Compile-time product capabilities omit desktop-only updates, collaboration calls, CLI installation, and desktop scheme registration. Repeat action dispatch in the signed HAP. |
 | Project, Outline, Git, and Terminal panels | `Verified` | Production panels load for current OHOS workspaces. Shared initialization must keep this true for every new workspace. |
-| Agent panel | `NeedsRuntime` | The action is registered before asynchronous panel restore. It creates a missing panel before it gives it focus. Test View > Agent Panel in a new and a restored workspace. |
+| Agent panel | `NeedsRuntime` | The action is registered before asynchronous panel restore. It creates a missing panel before it gives it focus. OHOS opens the real loaded panel at workspace startup. Test startup, View > Agent Panel, a new workspace, and a restored workspace. |
 | Collaboration core panel | `NeedsRuntime` | Collaboration core and its panel compile without desktop media. The OHOS product initializes them and exposes the View action. Test panel creation, sign-in state, and non-call collaboration flows. |
 | Debugger and REPL | `NeedsRuntime` | `debugger_ui`, DAP stores/adapters, debugger tools, `repl`, and notebooks initialize in the OHOS product. Native adapter downloads are rejected; packaged HNP, configured OHOS, Node, and remote commands remain valid. Test one packaged or configured adapter and one interpreter. |
 | Calls, voice, and screen share | `BackendRequired` | Current `cpal` and LiveKit select Linux GLib/ALSA/libwebrtc paths and do not compile as an OHOS product. Add OHAudio input/output and an OHOS WebRTC/screen-capture path before enabling these controls. Collaboration core does not depend on these media backends. |
@@ -104,7 +105,7 @@ A successful cross-build does not mean that the feature works at runtime.
 | URL/deep-link and shared-file receive | `NeedsRuntime` | `onCreate` and `onNewWant` collect `zed://`, view, file, folder, and shared-file Wants, resolve file URIs, and deliver them through GPUI `on_open_urls`. The manifest declares the required skills. Test cold and warm delivery. |
 | Inbound drag and drop | `NeedsRuntime` | The ArkUI UDMF bridge and GPUI event sequence cross-build. Repeat the test on a connected emulator and physical device. |
 | Outbound drag | `NeedsRuntime` | GPUI file/folder payloads now call ArkUI `executeDrag` with UDMF records, file URIs, and a preview. Test transfer to Files and another application. |
-| Native prompts, pickers, notifications, reveal/open-with | `NeedsRuntime` | Implemented. The newest package needs a repeat runtime pass. |
+| Native prompts, pickers, notifications, reveal/open-with | `NeedsRuntime` | ArkUI owns prompts. The bridge retains each GPUI answer index, orders Cancel before the action for the native desktop layout, and marks the first GPUI answer as the native primary action. The newest package needs a repeat removal, warning, and multi-answer runtime pass. |
 | Crash reporting | `NeedsRuntime` | `zed_ohos` installs a process-lifetime native HiAppEvent watcher for the FaultLogger `APP_CRASH` event before product startup. The desktop minidump helper is absent. Trigger a test crash and confirm event delivery. |
 | Updates | `ExternalGate` | The commercial SDK provides AppGalleryKit `updateManager.checkAppUpdate` and `showUpdateDialog`, but the current OpenHarmony debug product has no AppGallery listing or credentials. Enable this only in an AppGallery build flavor. OpenHarmony uses its distributor/package manager. Desktop self-replacement stays disabled. |
 | Git, shell, core utilities, Node/npm, OpenSSH | `NeedsRuntime` | Pinned HNP executables are packaged. Git/HTTPS and pipe terminals are verified. OpenSSH now handles the missing HarmonyOS `/etc/passwd` entry with a bounded local client identity adapter and explicit app-private environment. Repeat Node LSP, tasks, SSH authentication, transfer, Git-over-SSH, and remote workspace tests. |
@@ -129,10 +130,10 @@ block product parity.
 - `build-ohos.ps1 -Step rust -RustProfile dev` links the complete OHOS Rust product.
 - `build-ohos.ps1 -Step hap -RustProfile release-fast -ReuseExistingNodeBundle` compiles ArkTS, packages HNP, builds the HAP, and signs it successfully.
 - Signed artifact: `crates/zed_ohos/hap/entry/build/default/outputs/default/entry-default-signed.hap`.
-- Size: `413560436` bytes.
-- SHA-256: `553C9ED5543EE993BD451355C97B0646B93118E6EF9E601CAE6CA8C968723366`.
+- Size: `413581907` bytes.
+- SHA-256: `645E0BDDE275F5691C3D4A55D31FF171FC71A0BE768001520785B6AFF1C8696A`.
 - The resolved normal dependency graph contains none of `ashpd`, zbus, `trash-rs`, ALSA, GLib, LiveKit, or WebRTC.
-- `hdc install -r` installed this artifact on `127.0.0.1:5555` successfully. The user will do the UI acceptance checks without UI automation.
+- `hdc install -r` installed this artifact on `127.0.0.1:5555` successfully, and `aa force-stop dev.zed.Zed` stopped the previous process. The user will do the UI acceptance checks without UI automation.
 
 ## 2. Decisions
 
@@ -163,7 +164,7 @@ The following decisions are authoritative for the initial port:
 23. **Collaboration core is separate from media.** OHOS enables accounts, contacts, channels, projects, and Collaboration panel state without `cpal`, LiveKit, or WebRTC. Calls, voice, and screen share stay disabled until native OHOS media backends exist.
 24. **UIAbility owns the application lifetime.** Closing a GPUI auxiliary window does not quit the OHOS process. The platform closes that native subwindow, restores the previous native window, and quits only after an explicit application action or ability shutdown.
 25. **XComponent click sequences are derived in `gpui_ohos`.** The native mouse event has a timestamp, button, and position, but no click count. The backend stores only the prior click facts and derives the count with a 400 ms and 5 px limit. This is the same model as other GPUI platforms.
-26. **Packaged OpenSSH has an OHOS local identity adapter.** HarmonyOS application UIDs do not have `/etc/passwd` entries. The HNP build supplies the local `passwd` data that OpenSSH needs from Zed's explicit `HOME`, `USER`, `LOGNAME`, and `SHELL` environment. This does not replace or change the remote SSH username.
+26. **Packaged OpenSSH has one OHOS local identity adapter.** HarmonyOS application UIDs do not have `/etc/passwd` entries. The HNP build first uses the system database, then supplies the current local `passwd` data that OpenSSH needs from Zed's explicit `HOME`, `USER`, `LOGNAME`, and `SHELL` environment. Client entry points and shared tilde, subprocess, and home-directory helpers use this function. It never supplies an identity for another UID, and it does not replace or change the remote SSH username.
 
 ### Not a current decision
 
@@ -288,7 +289,7 @@ For every XComponent surface:
 5. Obtain its `OH_Drawing_Canvas`.
 6. Translate the current GPUI `Scene` and draw it onto the canvas.
 7. Flush the surface with `OH_Drawing_SurfaceFlush`.
-8. On resize, store only the newest physical size and request an ArkUI frame. At the frame boundary, destroy the old on-screen Drawing wrapper before creating the replacement for the same `OHNativeWindow`. Overlapping wrappers cause the old wrapper to invalidate the replacement EGL surface when destroyed. Clear only a newly created window surface; while replacing a resize wrapper, retain the compositor's previous buffer until the next complete scene is flushed so interactive resize cannot expose a blank frame.
+8. On resize, store only the newest physical size and request an ArkUI frame. At the frame boundary, destroy the old on-screen Drawing wrapper before creating the replacement for the same `OHNativeWindow`. Overlapping wrappers cause the old wrapper to invalidate the replacement EGL surface when destroyed. Clear only a newly created window surface; while replacing a resize wrapper, retain the compositor's previous buffer until the next complete scene is flushed so interactive resize cannot expose a blank frame. If ArkUI has already destroyed the native surface, consume the failed resize once, mark the GPUI surface unavailable, and wait for the next native surface event. Do not schedule an endless retry loop.
 9. On surface destruction, remove all window-bound state and retain only the event handler needed for a later surface-created callback.
 
 ArkTS recomputes `1 / UIContext.px2vp(1)` on every XComponent area change and
@@ -310,13 +311,10 @@ frame callback; no intermediate resize creates a redundant Drawing surface.
 `OH_NativeVSync_RequestFrame` is intentionally not used because GPUI foreground
 work and XComponent callbacks must remain coordinated with the ArkUI UI thread.
 
-The renderer records a complete GPUI scene into an
-`OH_Drawing_RecordCmdUtils` command list, replays it once to the on-screen
-canvas, and then flushes. Emulator profiling measured command recording at
-roughly 1–5 ms and replay plus `OH_Drawing_SurfaceFlush` at roughly 31–51 ms
-during live resize, so the remaining simulator roughness is primarily the
-Native Drawing/emulator presentation path rather than GPUI scene construction.
-Release builds do not emit the profiling or per-input logs on these hot paths.
+The renderer translates the complete GPUI scene directly to the on-screen
+Native Drawing canvas and flushes once. It does not allocate, record, and replay
+an intermediate `OH_Drawing_RecordCmdUtils` command list. Release builds do not
+emit profiling or per-input logs on these hot paths.
 
 The foreground queue lock must be released before running a task. Opening a GPUI
 window synchronously replays the already-created XComponent surface event, which
@@ -514,7 +512,8 @@ absolute HNP executable paths, including `scp -S` and `sftp -S`, rather than
 falling through to `/usr/bin/ssh`. Git uses the same packaged SSH command.
 Password prompts use the normal Zed askpass UDS protocol through the native
 packaged helper. Runtime authentication and remote-workspace coverage remain
-pending because `hdc list targets` currently reports no connected emulator.
+pending. The API 24 emulator is connected and the new package is installed,
+but the user must test the real destination and credentials.
 
 Kill/restart cleanup, foreground/background resource policy, and PTY availability on other signed images remain explicit runtime gates.
 
@@ -582,7 +581,7 @@ targets and distribution credentials. These facts cannot be replaced by a shim.
 - [x] Replace the process-local clipboard fallback with HarmonyOS system pasteboard integration and verify an on-device round trip.
 - [x] Open and edit a real sandbox file/workspace through `RealFs`, `WorktreeStore`, and `BufferStore`.
 - [x] Automatically save edits, close/reinstall/restart, and reopen the persisted sandbox document without corruption.
-- [ ] Load the production Agent, Collaboration, Project, Outline, Git, and Terminal panels. Project, Outline, Git, and Terminal are verified. Agent lazy creation and Collaboration core panel visibility still need runtime checks. Prevent transient zero workspace bounds from seeding a tiny dock size and preserve a user-resized Project panel width across close/reopen.
+- [ ] Load the production Agent, Collaboration, Project, Outline, Git, and Terminal panels. Project, Outline, Git, and Terminal are verified. OHOS now opens the production Agent panel after it loads; Agent and Collaboration visibility still need runtime checks. Prevent transient zero workspace bounds from seeding a tiny dock size and preserve a user-resized Project panel width across close/reopen.
 - [x] Initialize panels for every newly created `Workspace`, and verify that a live external-folder switch retains the Agent, Project, and Terminal docks. Route clone/open-folder/open-files new-window choices through normal Zed workspace creation and the general native-window backend.
 - [x] Initialize the production HTTP client, language-model/provider stack, prompt store, and secure Asset Store credential backend.
 - [x] Initialize production file finder, diagnostics, search, LSP locations, tasks, snippets, selectors, Vim, tab switcher, prompts, settings profiles, previews, onboarding, notifications, Git-hosting providers, feature flags, ACP/web-search support, and extension language/LSP/theme registration.
@@ -614,7 +613,7 @@ targets and distribution credentials. These facts cannot be replaced by a shim.
 - [ ] Finish representative language-server coverage. The rebuilt Node/npm package is installed and the earlier package launched vtsls; verify Tailwind and ESLint with the replacement runtime on-device.
 - [x] Package a shell and enable terminal child processes over pipes.
 - [ ] Verify tasks and complete diagnostics from a real Node-based language server using packaged Node 22/npm; the vtsls process launch is proven.
-- [ ] Package OpenSSH 10.4p1 clients with static OpenSSL, packaged native askpass, an OHOS local identity adapter, and absolute-path SSH/SCP/SFTP/Git integration. The package builds and installs; a real connection still needs a runtime check.
+- [x] Package OpenSSH 10.4p1 clients with static OpenSSL, packaged native askpass, one bounded OHOS local identity adapter for client and shared UID lookups, and absolute-path SSH/SCP/SFTP/Git integration. The package builds and installs; a real connection still needs a runtime check.
 - [ ] Verify SSH authentication, transfer, Git-over-SSH, and remote workspaces on-device.
 - [x] Reassess extension-host support and enable the production Wasmtime extension host with workspace-backed language/LSP/theme proxies.
 - [ ] Install and exercise a representative extension on-device.
@@ -625,7 +624,7 @@ targets and distribution credentials. These facts cannot be replaced by a shim.
 
 - [ ] Test physical aarch64 PC/2-in-1 hardware.
 - [ ] Validate OpenHarmony runtime compatibility and packaging differences.
-- [ ] Open Settings in a separate non-modal native window with server decorations and independent rendering/input. Verify configuration writes, live changes, centered placement, close, and return to the main window with the latest build.
+- [ ] Open Settings in a separate non-modal native window with server decorations and independent rendering/input. The configuration directory is created before the settings watcher starts. Closing a destroyed auxiliary surface no longer retries a failed resize each frame. Verify configuration writes, live changes, centered placement, close, and return to the main window with the latest build.
 - [ ] Generalize the platform to arbitrary workspace/tool windows; route normal Open Folder/Open Files/clone new-window flows through it and synchronize native position/maximize/fullscreen state back into GPUI bounds persistence. Verify close and centered placement after the re-entrant close fix and explicit ArkUI move.
 - [x] Implement inbound file/folder drag and drop through ArkUI UDMF and GPUI `FileDropEvent` routing for main and auxiliary windows.
 - [ ] Verify general new-window persistence and drag/drop on-device.

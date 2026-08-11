@@ -106,7 +106,7 @@ pub fn configure_frame_scheduler(
             + Sync,
     >,
     request_prompt: Arc<
-        dyn Fn(u32, u32, String, Option<String>, Vec<String>) -> Result<()> + Send + Sync,
+        dyn Fn(u32, u32, String, Option<String>, Vec<String>, Vec<u32>) -> Result<()> + Send + Sync,
     >,
     scale_factor: f32,
     ui_context: NonNull<c_void>,
@@ -464,7 +464,11 @@ struct OhosPlatform {
     >,
     request_prompt: RefCell<
         Option<
-            Arc<dyn Fn(u32, u32, String, Option<String>, Vec<String>) -> Result<()> + Send + Sync>,
+            Arc<
+                dyn Fn(u32, u32, String, Option<String>, Vec<String>, Vec<u32>) -> Result<()>
+                    + Send
+                    + Sync,
+            >,
         >,
     >,
     next_path_prompt_id: Cell<u32>,
@@ -688,12 +692,13 @@ impl OhosPlatform {
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    let mut state = window.borrow_mut();
+                    state.surface_available = false;
+                    state.surface_size = None;
                     log_message(
                         LogLevel::Error,
                         format!("failed to apply the pending surface resize: {error:#}"),
                     );
-                    self.request_frame();
-                    continue;
                 }
             }
             let mut callback = {
@@ -737,7 +742,9 @@ impl OhosPlatform {
                 + Sync,
         >,
         request_prompt: Arc<
-            dyn Fn(u32, u32, String, Option<String>, Vec<String>) -> Result<()> + Send + Sync,
+            dyn Fn(u32, u32, String, Option<String>, Vec<String>, Vec<u32>) -> Result<()>
+                + Send
+                + Sync,
         >,
         scale_factor: f32,
         ui_context: NonNull<c_void>,
@@ -934,6 +941,14 @@ impl OhosPlatform {
             .iter()
             .map(|answer| answer.label().to_string())
             .collect::<Vec<_>>();
+        let kinds = answers
+            .iter()
+            .map(|answer| match answer {
+                PromptButton::Ok(_) => 0,
+                PromptButton::Cancel(_) => 1,
+                PromptButton::Other(_) => 2,
+            })
+            .collect::<Vec<_>>();
         let level = match level {
             PromptLevel::Info => 0,
             PromptLevel::Warning => 1,
@@ -956,6 +971,7 @@ impl OhosPlatform {
             message.to_owned(),
             detail.map(ToOwned::to_owned),
             labels,
+            kinds,
         ) {
             self.pending_prompts.borrow_mut().remove(&request_id);
             log_message(

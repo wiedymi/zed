@@ -73,7 +73,8 @@ interface ZedNativeContext extends FileDropNativeContext {
       level: number,
       message: string,
       detail: string | undefined,
-      answers: Array<string>
+      answers: Array<string>,
+      answerKinds: Array<number>
     ) => void,
     uiContext: UIContext,
     scaleFactor: number,
@@ -597,14 +598,22 @@ struct Index {
             level: number,
             message: string,
             detail: string | undefined,
-            answers: Array<string>
+            answers: Array<string>,
+            answerKinds: Array<number>
           ) => {
-            const buttons: Array<AlertDialogButtonOptions> = answers.map(
-              (answer: string, index: number): AlertDialogButtonOptions => ({
-                value: answer,
-                defaultFocus: index === 0,
-                primary: index === 0,
-                action: () => zedContext.completePrompt(requestId, index)
+            const orderedIndices = answers.map((_answer: string, index: number): number => index);
+            orderedIndices.sort((left: number, right: number): number => {
+              const leftRank = answerKinds[left] === 1 ? 0 : 1;
+              const rightRank = answerKinds[right] === 1 ? 0 : 1;
+              return leftRank - rightRank;
+            });
+            const buttons: Array<AlertDialogButtonOptions> = orderedIndices.map(
+              (answerIndex: number): AlertDialogButtonOptions => ({
+                value: answers[answerIndex],
+                defaultFocus: answerIndex === 0,
+                primary: answerIndex === 0,
+                style: answerIndex === 0 ? DialogButtonStyle.HIGHLIGHT : DialogButtonStyle.DEFAULT,
+                action: () => zedContext.completePrompt(requestId, answerIndex)
               })
             );
             try {
@@ -620,7 +629,8 @@ struct Index {
                 title: detail ? message : undefined,
                 message: detail ?? message,
                 autoCancel: false,
-                buttons: buttons
+                buttons: buttons,
+                buttonDirection: DialogButtonDirection.HORIZONTAL
               });
             } catch (error) {
               zedContext.completePrompt(requestId, undefined, `Unable to open dialog: ${JSON.stringify(error)}`);

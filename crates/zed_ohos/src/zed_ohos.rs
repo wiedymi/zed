@@ -196,7 +196,7 @@ pub fn initialize_frame_scheduler(
         (u32, bool, bool, bool, bool, Option<String>, Option<String>),
         (),
     >,
-    request_prompt: Function<'_, (u32, u32, String, Option<String>, Vec<String>), ()>,
+    request_prompt: Function<'_, (u32, u32, String, Option<String>, Vec<String>, Vec<u32>), ()>,
     ui_context: Unknown<'_>,
     scale_factor: f64,
     files_dir: String,
@@ -399,7 +399,7 @@ pub fn initialize_frame_scheduler(
         },
     );
     let request_prompt = request_prompt
-        .build_threadsafe_function::<(u32, u32, String, Option<String>, Vec<String>)>()
+        .build_threadsafe_function::<(u32, u32, String, Option<String>, Vec<String>, Vec<u32>)>()
         .callee_handled::<false>()
         .build_callback(|context| Ok(FnArgs::from(context.value)))?;
     let request_prompt = Arc::new(
@@ -407,9 +407,10 @@ pub fn initialize_frame_scheduler(
               level: u32,
               message: String,
               detail: Option<String>,
-              answers: Vec<String>| {
+              answers: Vec<String>,
+              answer_kinds: Vec<u32>| {
             let status = request_prompt.call_with_priority(
-                (request_id, level, message, detail, answers),
+                (request_id, level, message, detail, answers, answer_kinds),
                 ThreadsafeFunctionPriority::Immediate,
             );
             if status == Status::Ok {

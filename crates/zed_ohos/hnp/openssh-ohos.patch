@@ -1,27 +1,31 @@
 diff --git a/Makefile.in b/Makefile.in
-index d8e70d9f..ebd2a4dc 100644
+index da59bcc..1f14598 100644
 --- a/Makefile.in
 +++ b/Makefile.in
-@@ -113,6 +113,6 @@ SKOBJS=ssh-sk.o sk-usbhid.o
- 
- SSHOBJS= ssh.o readconf.o clientloop.o sshtty.o \
--	sshconnect.o sshconnect2.o mux.o ssh-pkcs11.o $(SKOBJS)
-+	sshconnect.o sshconnect2.o mux.o ssh-pkcs11.o ohos-pwd.o $(SKOBJS)
- 
- SSHDOBJS=sshd.o \
- 	platform-listen.o \
-@@ -154,4 +154,4 @@ SFTP_CLIENT_OBJS=sftp-common.o sftp-client.o sftp-glob.o ssherr-nolibcrypto.o
- 
--SCP_OBJS=	scp.o progressmeter.o $(SFTP_CLIENT_OBJS)
-+SCP_OBJS=	scp.o progressmeter.o ohos-pwd.o $(SFTP_CLIENT_OBJS)
- 
- SSHADD_OBJS=	ssh-add.o $(P11OBJS) $(SKOBJS)
+@@ -111 +111 @@ LIBSSH_OBJS=${LIBOPENSSH_OBJS} \
+-	sshbuf-io.o misc-agent.o ssherr-libcrypto.o
++	sshbuf-io.o misc-agent.o ssherr-libcrypto.o ohos-pwd.o
+diff --git a/misc.c b/misc.c
+index 517fa7a..f60ed56 100644
+--- a/misc.c
++++ b/misc.c
+@@ -67,0 +68 @@
++#include "ohos-pwd.h"
+@@ -1303 +1304 @@ tilde_expand(const char *filename, uid_t uid, char **retp)
+-	} else if ((pw = getpwuid(uid)) == NULL) {
++	} else if ((pw = ohos_getpwuid(uid)) == NULL) {
+@@ -2848 +2849 @@ subprocess(const char *tag, const char *command,
+-	if (pw == NULL && (pw = getpwuid(getuid())) == NULL) {
++	if (pw == NULL && (pw = ohos_getpwuid(getuid())) == NULL) {
+@@ -3225 +3226 @@ get_homedir(void)
+-	if ((pw = getpwuid(getuid())) != NULL && *pw->pw_dir != '\0')
++	if ((pw = ohos_getpwuid(getuid())) != NULL && *pw->pw_dir != '\0')
 diff --git a/ohos-pwd.c b/ohos-pwd.c
 new file mode 100644
-index 00000000..98cdb2cb
+index 0000000..ef9b242
 --- /dev/null
 +++ b/ohos-pwd.c
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,43 @@
 +/* HarmonyOS application UIDs do not have entries in /etc/passwd. */
 +
 +#include "includes.h"
@@ -43,8 +47,9 @@ index 00000000..98cdb2cb
 +}
 +
 +struct passwd *
-+ohos_getpwuid(void)
++ohos_getpwuid(uid_t uid)
 +{
++	struct passwd *system_user = getpwuid(uid);
 +	static char default_name[] = "zed";
 +	static char default_password[] = "*";
 +	static char default_home[] = "/data/app";
@@ -52,9 +57,12 @@ index 00000000..98cdb2cb
 +	static char default_gecos[] = "Zed";
 +	static struct passwd user;
 +
++	if (system_user != NULL || uid != getuid())
++		return system_user;
++
 +	user.pw_name = environment_or_default("USER", default_name);
 +	user.pw_passwd = default_password;
-+	user.pw_uid = getuid();
++	user.pw_uid = uid;
 +	user.pw_gid = getgid();
 +	user.pw_gecos = default_gecos;
 +	user.pw_dir = environment_or_default("HOME", default_home);
@@ -63,57 +71,34 @@ index 00000000..98cdb2cb
 +}
 diff --git a/ohos-pwd.h b/ohos-pwd.h
 new file mode 100644
-index 00000000..ba1cbe3d
+index 0000000..b62ca01
 --- /dev/null
 +++ b/ohos-pwd.h
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +#ifndef OHOS_PWD_H
 +#define OHOS_PWD_H
 +
++#include <sys/types.h>
 +#include <pwd.h>
 +
-+struct passwd *ohos_getpwuid(void);
++struct passwd *ohos_getpwuid(uid_t uid);
 +
 +#endif
 diff --git a/scp.c b/scp.c
-index d5178366..2097cb9b 100644
+index 28ac7a2..84e76bf 100644
 --- a/scp.c
 +++ b/scp.c
-@@ -119,6 +119,7 @@
- 
- #include "sftp-common.h"
- #include "sftp-client.h"
+@@ -119,0 +120 @@
 +#include "ohos-pwd.h"
- 
- extern char *__progname;
- 
-@@ -508,6 +509,8 @@ main(int argc, char **argv)
- 		mode = MODE_SCP;
- 
- 	if ((pwd = getpwuid(userid = getuid())) == NULL)
-+		pwd = ohos_getpwuid();
-+	if (pwd == NULL)
- 		fatal("unknown user %u", (u_int) userid);
- 
- 	if (!isatty(STDOUT_FILENO))
+@@ -631 +632 @@ main(int argc, char **argv)
+-	if ((pwd = getpwuid(userid = getuid())) == NULL)
++	if ((pwd = ohos_getpwuid(userid = getuid())) == NULL)
 diff --git a/ssh.c b/ssh.c
-index 3bf3a176..782025e9 100644
+index 7c644c2..8dc2c77 100644
 --- a/ssh.c
 +++ b/ssh.c
-@@ -92,6 +92,7 @@
- #include "version.h"
- #include "ssherr.h"
- #include "utf8.h"
+@@ -98,0 +99 @@
 +#include "ohos-pwd.h"
- 
- #ifdef ENABLE_PKCS11
- #include "ssh-pkcs11.h"
-@@ -703,6 +704,8 @@ main(int ac, char **av)
- 
- 	/* Get user data. */
- 	pw = getpwuid(getuid());
-+	if (pw == NULL)
-+		pw = ohos_getpwuid();
- 	if (!pw) {
- 		logit("No user exists for uid %lu", (u_long)getuid());
- 		exit(255);
+@@ -664 +665 @@ main(int ac, char **av)
+-	pw = getpwuid(getuid());
++	pw = ohos_getpwuid(getuid());
