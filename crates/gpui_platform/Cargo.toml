@@ -30,8 +30,11 @@ gpui_macos.workspace = true
 gpui_windows.workspace = true
 gpui = { workspace = true, features = ["windows-manifest"] }
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+[target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "freebsd"))'.dependencies]
 gpui_linux.workspace = true
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+gpui_ohos.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 gpui_web.workspace = true

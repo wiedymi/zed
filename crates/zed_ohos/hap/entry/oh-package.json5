@@ -1,0 +1,11 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Zed HarmonyOS entry module",
+  "main": "",
+  "author": "Zed Industries",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "libzed_ohos.so": "file:./src/main/cpp/types/libzed_ohos"
+  }
+}

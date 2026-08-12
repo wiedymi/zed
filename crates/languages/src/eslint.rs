@@ -144,9 +144,50 @@ impl LspInstaller for EsLintLspAdapter {
                     .await?;
                 }
 
+                #[cfg(target_env = "ohos")]
+                {
+                    let dependency_directories = [
+                        repo_root.clone(),
+                        repo_root.join("client"),
+                        repo_root.join("server"),
+                    ];
+                    for directory in dependency_directories {
+                        node.run_npm_subcommand(
+                            Some(&directory),
+                            "install",
+                            &["--no-bin-links", "--ignore-scripts"],
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "installing ESLint language server dependencies in {}",
+                                directory.display()
+                            )
+                        })?;
+                    }
+                }
+                #[cfg(not(target_env = "ohos"))]
                 node.run_npm_subcommand(Some(&repo_root), "install", &[])
                     .await?;
 
+                #[cfg(target_env = "ohos")]
+                {
+                    let typescript_compiler = repo_root.join("node_modules/typescript/bin/tsc");
+                    let output = util::command::new_command(node.binary_path().await?)
+                        .current_dir(&repo_root)
+                        .arg(&typescript_compiler)
+                        .arg("-b")
+                        .output()
+                        .await
+                        .context("running the ESLint language server TypeScript compiler")?;
+                    anyhow::ensure!(
+                        output.status.success(),
+                        "ESLint language server TypeScript compilation failed:\nstdout: {}\nstderr: {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                #[cfg(not(target_env = "ohos"))]
                 node.run_npm_subcommand(Some(&repo_root), "run-script", &["compile"])
                     .await?;
             }

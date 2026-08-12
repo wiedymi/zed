@@ -860,6 +860,9 @@ impl github::Host for WasmState {
 
 impl platform::Host for WasmState {
     async fn current_platform(&mut self) -> Result<(platform::Os, platform::Architecture)> {
+        if cfg!(target_env = "ohos") {
+            bail!("this extension API version cannot represent HarmonyOS as an operating system");
+        }
         Ok((
             match env::consts::OS {
                 "macos" => platform::Os::Mac,
@@ -894,6 +897,13 @@ impl process::Host for WasmState {
         maybe!(async {
             self.capability_granter
                 .grant_exec(&command.command, &command.args)?;
+
+            let command_path = Path::new(&command.command);
+            if command_path.is_absolute()
+                && command_path.starts_with(self.host.work_dir.join(self.manifest.id.as_ref()))
+            {
+                util::command::ExecutableOrigin::NativeDownload.ensure_supported()?;
+            }
 
             let output = util::command::new_command(command.command.as_str())
                 .args(&command.args)
@@ -1136,6 +1146,9 @@ impl ExtensionImports for WasmState {
     }
 
     async fn make_file_executable(&mut self, path: String) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = util::command::ExecutableOrigin::NativeDownload.ensure_supported() {
+            return Ok(Err(error.to_string()));
+        }
         let path = self
             .host
             .writeable_path_from_extension(&self.manifest.id, Path::new(&path))

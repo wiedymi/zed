@@ -1,6 +1,7 @@
 //! Paths to locations used by Zed.
 
 use std::env;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
 
@@ -65,6 +66,13 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// On Windows, this is `%APPDATA%\Zed`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// A custom cache/temp directory override for platforms whose application
+/// sandbox exposes cache storage independently from persistent files.
+static CUSTOM_TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The resolved cache/temp directory.
+static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
 /// Returns the relative path to the zed_server directory on the ssh host.
 pub fn remote_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
@@ -101,21 +109,94 @@ pub fn remote_wsl_server_dir_relative() -> &'static RelPath {
 /// * The directory's path cannot be canonicalized to an absolute path
 /// * The directory cannot be created
 pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
+    try_set_custom_data_dir(Path::new(dir)).expect("failed to set custom data directory")
+}
+
+/// Fallible variant of [`set_custom_data_dir`] for embedded platforms, where
+/// a path supplied by the host runtime must never turn into a process abort.
+pub fn try_set_custom_data_dir(dir: &Path) -> io::Result<&'static PathBuf> {
     if CURRENT_DATA_DIR.get().is_some() || CONFIG_DIR.get().is_some() {
-        panic!("set_custom_data_dir called after data_dir or config_dir was initialized");
+        return Err(io::Error::other(
+            "custom data directory was configured after Zed paths were initialized",
+        ));
     }
-    CUSTOM_DATA_DIR.get_or_init(|| {
-        let path = PathBuf::from(dir);
-        std::fs::create_dir_all(&path).expect("failed to create custom data directory");
-        let canonicalized = path
-            .canonicalize()
-            .expect("failed to canonicalize custom data directory's path to an absolute path");
-        // On Windows, `canonicalize` produces extended-length paths prefixed
-        // with `\\?\`. Strip that prefix so downstream consumers (e.g.
-        // Node.js language servers) that receive derived paths as arguments
-        // don't choke on the verbatim syntax.
-        SanitizedPath::new(&canonicalized).as_path().to_path_buf()
-    })
+
+    if let Some(configured) = CUSTOM_DATA_DIR.get() {
+        return paths_match(configured, dir)
+            .then_some(configured)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "custom data directory is already {}, not {}",
+                        configured.display(),
+                        dir.display()
+                    ),
+                )
+            });
+    }
+
+    let canonicalized = canonicalize_directory(dir)?;
+    CUSTOM_DATA_DIR.set(canonicalized).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "custom data directory was configured concurrently",
+        )
+    })?;
+    CUSTOM_DATA_DIR
+        .get()
+        .ok_or_else(|| io::Error::other("custom data directory was not retained"))
+}
+
+/// Configures the cache/temp directory used by Zed. This is separate from the
+/// persistent data directory on mobile-style sandboxed platforms.
+pub fn try_set_custom_temp_dir(dir: &Path) -> io::Result<&'static PathBuf> {
+    if TEMP_DIR.get().is_some() {
+        return Err(io::Error::other(
+            "custom temp directory was configured after Zed paths were initialized",
+        ));
+    }
+
+    if let Some(configured) = CUSTOM_TEMP_DIR.get() {
+        return paths_match(configured, dir)
+            .then_some(configured)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "custom temp directory is already {}, not {}",
+                        configured.display(),
+                        dir.display()
+                    ),
+                )
+            });
+    }
+
+    let canonicalized = canonicalize_directory(dir)?;
+    CUSTOM_TEMP_DIR.set(canonicalized).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "custom temp directory was configured concurrently",
+        )
+    })?;
+    CUSTOM_TEMP_DIR
+        .get()
+        .ok_or_else(|| io::Error::other("custom temp directory was not retained"))
+}
+
+fn canonicalize_directory(dir: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let canonicalized = dir.canonicalize()?;
+    // On Windows, `canonicalize` produces extended-length paths prefixed with
+    // `\\?\`. Strip that prefix so downstream consumers that receive derived
+    // paths as arguments do not choke on the verbatim syntax.
+    Ok(SanitizedPath::new(&canonicalized).as_path().to_path_buf())
+}
+
+fn paths_match(configured: &Path, requested: &Path) -> bool {
+    requested
+        .canonicalize()
+        .is_ok_and(|requested| SanitizedPath::new(&requested).as_path() == configured)
 }
 
 /// Returns the path to the configuration directory used by Zed.
@@ -191,8 +272,11 @@ pub fn state_dir() -> &'static PathBuf {
 
 /// Returns the path to the temp directory used by Zed.
 pub fn temp_dir() -> &'static PathBuf {
-    static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
+        if let Some(custom_dir) = CUSTOM_TEMP_DIR.get() {
+            return custom_dir.clone();
+        }
+
         if cfg!(target_os = "macos") {
             return dirs::cache_dir()
                 .expect("failed to determine cachesDirectory directory")

@@ -26,7 +26,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
@@ -1122,6 +1122,8 @@ fn recv_fds(stream: &UnixStream) -> std::io::Result<Vec<OwnedFd>> {
 
 /// `(device, inode)` of the object an already-open descriptor refers to.
 fn fd_dev_ino(fd: RawFd) -> std::io::Result<(u64, u64)> {
+    // SAFETY: callers keep `fd` open for this synchronous identity query.
+    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let stat = nix::sys::stat::fstat(fd).map_err(std::io::Error::from)?;
     Ok((stat.st_dev as u64, stat.st_ino as u64))
 }

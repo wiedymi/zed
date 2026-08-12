@@ -1087,7 +1087,14 @@ impl Dock {
     }
 
     pub fn clamp_panel_size(&mut self, max_size: Pixels, window: &Window, cx: &mut Context<Self>) {
-        let max_size = (max_size - RESIZE_HANDLE_SIZE).abs();
+        // A workspace can be laid out with empty bounds while its native window is
+        // being attached or reconfigured. Treating that transient zero as a real
+        // maximum used to replace every fixed panel's size with the resize-handle
+        // width, so the next time the panel opened it was effectively invisible.
+        if max_size <= RESIZE_HANDLE_SIZE {
+            return;
+        }
+        let max_size = max_size - RESIZE_HANDLE_SIZE;
         let mut clamped = false;
         for entry in &mut self.panel_entries {
             let uses_flexible_width =

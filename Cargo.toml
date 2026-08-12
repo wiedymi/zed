@@ -95,7 +95,9 @@ members = [
     "crates/gpui_linux",
     "crates/gpui_macos",
     "crates/gpui_macros",
+    "crates/gpui_ohos",
     "crates/gpui_platform",
+    "crates/gpui_text",
     "crates/gpui_tokio",
     "crates/gpui_util",
     "crates/gpui_web",
@@ -234,6 +236,7 @@ members = [
     "crates/worktree_benchmarks",
     "crates/x_ai",
     "crates/zed",
+    "crates/zed_ohos",
     "crates/zed_actions",
     "crates/windows_resources",
     "crates/zed_credentials_provider",
@@ -357,7 +360,9 @@ gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_linux = { path = "crates/gpui_linux", default-features = false }
 gpui_macos = { path = "crates/gpui_macos", default-features = false }
 gpui_macros = { path = "crates/gpui_macros" }
+gpui_ohos = { path = "crates/gpui_ohos", default-features = false }
 gpui_platform = { path = "crates/gpui_platform", default-features = false }
+gpui_text = { path = "crates/gpui_text" }
 gpui_web = { path = "crates/gpui_web" }
 gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
@@ -499,6 +504,7 @@ workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 zed = { path = "crates/zed" }
+zed_product = { package = "zed", path = "crates/zed", default-features = false }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
 zed_env_vars = { path = "crates/zed_env_vars" }
@@ -681,7 +687,7 @@ minidumper = "0.9"
 moka = { version = "0.12.10", features = ["sync"] }
 nanoid = "0.4"
 nbformat = "1.2.0"
-nix = "0.29"
+nix = "0.30"
 notify-rust = "4"
 nucleo = "0.5"
 num-format = "0.4.4"
@@ -966,7 +972,7 @@ features = [
 ]
 
 [patch.crates-io]
-async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-process = { path = "vendor/async-process" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 calloop = { git = "https://github.com/zed-industries/calloop" }

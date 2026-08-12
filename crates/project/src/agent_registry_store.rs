@@ -579,6 +579,10 @@ fn resolve_icon_url(entry: &RegistryEntry) -> Option<String> {
 }
 
 fn current_platform_key() -> Option<&'static str> {
+    if cfg!(target_env = "ohos") {
+        return None;
+    }
+
     let os = if cfg!(target_os = "macos") {
         "darwin"
     } else if cfg!(target_os = "linux") {

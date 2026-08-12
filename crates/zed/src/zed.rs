@@ -1,18 +1,32 @@
+#[path = "zed/app_menus.rs"]
 mod app_menus;
+#[path = "zed/edit_prediction_registry.rs"]
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
+#[path = "zed/mac_only_instance.rs"]
 pub(crate) mod mac_only_instance;
+#[path = "zed/migrate.rs"]
 mod migrate;
 #[cfg(target_os = "macos")]
+#[path = "zed/move_to_applications.rs"]
 pub(crate) mod move_to_applications;
+#[cfg(feature = "desktop")]
+#[path = "zed/open_listener.rs"]
 mod open_listener;
+#[cfg(feature = "desktop")]
+#[path = "zed/open_url_modal.rs"]
 mod open_url_modal;
+#[path = "zed/quick_action_bar.rs"]
 mod quick_action_bar;
+#[path = "zed/remote_debug.rs"]
 pub mod remote_debug;
+#[path = "zed/telemetry_log.rs"]
 pub mod telemetry_log;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+#[path = "zed/visual_tests.rs"]
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
+#[path = "zed/windows_only_instance.rs"]
 pub(crate) mod windows_only_instance;
 
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
@@ -29,7 +43,6 @@ use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
-use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::branch_diff::BranchDiffToolbar;
 use git_ui::commit_view::CommitViewToolbar;
@@ -54,6 +67,7 @@ use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
 use migrator::migrate_keymap;
 use onboarding::multibuffer_hint::MultibufferHint;
+#[cfg(feature = "desktop")]
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
 use paths::{
@@ -94,27 +108,39 @@ use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
 use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 
+use workspace::Pane;
 use workspace::{
-    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Toast, Workspace,
-    WorkspaceSettings, create_and_open_local_file,
-    notifications::simple_message_notification::MessageNotification, open_new,
+    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Workspace, WorkspaceSettings,
+    create_and_open_local_file, notifications::simple_message_notification::MessageNotification,
+    open_new,
 };
 use workspace::{
     CloseIntent, CloseProject, CloseWindow, RestoreBanner, with_active_or_new_workspace,
 };
-use workspace::{Pane, notifications::DetachAndPromptErr};
+#[cfg(feature = "desktop")]
+use workspace::{Toast, notifications::DetachAndPromptErr};
+#[cfg(feature = "desktop")]
+use zed_actions::OpenZedUrl;
 use zed_actions::{
     About, GetMerch, OpenAccountSettings, OpenBrowser, OpenDocs, OpenProjectTasks,
-    OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
+    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit,
 };
 
 const DOCS_URL: &str = "https://zed.dev/docs/";
 const STATUS_URL: &str = "https://status.zed.dev";
 const MERCH_URL: &str = "https://merch.zed.dev/";
 
+#[cfg(feature = "desktop")]
 pub struct CrashHandler(pub Arc<crashes::Client>);
 
+#[cfg(feature = "desktop")]
 impl gpui::Global for CrashHandler {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductPlatform {
+    Desktop,
+    Ohos,
+}
 
 actions!(
     zed,
@@ -188,7 +214,7 @@ actions!(
     ]
 );
 
-pub fn init(cx: &mut App) {
+pub fn init(stdout_is_a_pty: bool, cx: &mut App) {
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &Hide, cx| cx.hide());
     #[cfg(target_os = "macos")]
@@ -222,7 +248,7 @@ pub fn init(cx: &mut App) {
     // When Zed logs to stdout rather than the log file, avoid registering
     // handlers for both `OpenLog` and `RevealLogInFileManager`, as the log file
     // does not exist in that scenario and these actions would error.
-    if !crate::stdout_is_a_pty() {
+    if !stdout_is_a_pty {
         cx.on_action(|_: &OpenLog, cx| {
             with_active_or_new_workspace(cx, |workspace, window, cx| {
                 open_log_file(workspace, window, cx);
@@ -345,7 +371,12 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
                 })
             })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = cx;
+        None
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_env = "ohos")))]
     {
         Some(cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
@@ -373,7 +404,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
 
     let use_system_window_tabs = WorkspaceSettings::get_global(cx).use_system_window_tabs;
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "freebsd"
+    ))]
     static APP_ICON: std::sync::LazyLock<Option<std::sync::Arc<image::RgbaImage>>> =
         std::sync::LazyLock::new(|| {
             // this shouldn't fail since decode is checked in build.rs
@@ -408,7 +442,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         display_id: display.map(|display| display.id()),
         window_background: cx.theme().window_background_appearance(),
         app_id: Some(app_id.to_owned()),
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(
+            all(target_os = "linux", not(target_env = "ohos")),
+            target_os = "freebsd"
+        ))]
         icon: APP_ICON.as_ref().cloned(),
         window_decorations: Some(window_decorations),
         window_min_size: Some(gpui::Size {
@@ -424,7 +461,11 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
     }
 }
 
-pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+pub fn initialize_workspace(
+    app_state: Arc<AppState>,
+    product_platform: ProductPlatform,
+    cx: &mut App,
+) {
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -574,6 +615,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         if let Some(specs) = window.gpu_specs() {
             log::info!("Using GPU: {:?}", specs);
             show_software_emulation_warning_if_needed(specs.clone(), window, cx);
+            #[cfg(feature = "desktop")]
             if let Some(crash_client) = cx.try_global::<CrashHandler>() {
                 crashes::set_gpu_info(&crash_client.0, specs);
             }
@@ -648,9 +690,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_right_item(image_info, window, cx);
         });
 
-        let panels_task = initialize_panels(window, cx);
+        let panels_task = initialize_panels(product_platform, window, cx);
         workspace.set_panels_task(panels_task);
-        register_actions(app_state.clone(), workspace, window, cx);
+        register_actions(app_state.clone(), product_platform, workspace, window, cx);
 
         if !workspace.has_active_modal(window, cx) {
             workspace.focus_handle(cx).focus(window, cx);
@@ -771,43 +813,118 @@ fn show_software_emulation_warning_if_needed(
     }
 }
 
-fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<anyhow::Result<()>> {
+fn initialize_panels(
+    product_platform: ProductPlatform,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Task<anyhow::Result<()>> {
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let channels_panel =
-            collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
+            panel_name: &'static str,
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
             workspace_handle: WeakEntity<Workspace>,
             mut cx: gpui::AsyncWindowContext,
         ) {
-            if let Some(panel) = panel_task.await.context("failed to load panel").log_err()
+            match panel_task
+                .await
+                .with_context(|| format!("failed to load {panel_name} panel"))
             {
-                workspace_handle
-                    .update_in(&mut cx, |workspace, window, cx| {
-                        workspace.add_panel(panel, window, cx);
-                    })
-                    .log_err();
+                Ok(panel) => {
+                    if let Err(error) = workspace_handle.update_in(
+                        &mut cx,
+                        |workspace, window, cx| workspace.add_panel(panel, window, cx),
+                    ) {
+                        report_panel_load_error(panel_name, &error, workspace_handle, &mut cx);
+                    }
+                }
+                Err(error) => {
+                    report_panel_load_error(panel_name, &error, workspace_handle, &mut cx);
+                }
             }
         }
 
         futures::join!(
-            add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
+            add_panel_when_ready(
+                "Project",
+                project_panel,
+                workspace_handle.clone(),
+                cx.clone()
+            ),
+            add_panel_when_ready(
+                "Outline",
+                outline_panel,
+                workspace_handle.clone(),
+                cx.clone()
+            ),
+            add_panel_when_ready(
+                "Terminal",
+                terminal_panel,
+                workspace_handle.clone(),
+                cx.clone()
+            ),
+            add_panel_when_ready("Git", git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready("Debug", debug_panel, workspace_handle.clone(), cx.clone()),
+            initialize_agent_panel_with_reporting(workspace_handle.clone(), cx.clone()),
         );
+
+        #[cfg(feature = "collaboration")]
+        {
+            let channels_panel = collab_ui::collab_panel::CollabPanel::load(
+                workspace_handle.clone(),
+                cx.clone(),
+            );
+            add_panel_when_ready(
+                "Collaboration",
+                channels_panel,
+                workspace_handle.clone(),
+                cx.clone(),
+            )
+            .await;
+        }
+
+        if product_platform == ProductPlatform::Ohos {
+            workspace_handle.update_in(&mut cx.clone(), |workspace, window, cx| {
+                if workspace.panel::<agent_ui::AgentPanel>(cx).is_some() {
+                    workspace.reveal_panel::<agent_ui::AgentPanel>(window, cx);
+                    log::info!("opened the HarmonyOS Agent panel after restoring all panels");
+                } else if !DisableAiSettings::get_global(cx).disable_ai {
+                    log::error!("the HarmonyOS Agent panel was not registered after loading");
+                }
+            })?;
+        }
 
         anyhow::Ok(())
     })
+}
+
+async fn initialize_agent_panel_with_reporting(
+    workspace_handle: WeakEntity<Workspace>,
+    mut cx: AsyncWindowContext,
+) {
+    if let Err(error) = initialize_agent_panel(workspace_handle.clone(), cx.clone()).await {
+        report_panel_load_error("Agent", &error, workspace_handle, &mut cx);
+    }
+}
+
+fn report_panel_load_error(
+    panel_name: &str,
+    error: &anyhow::Error,
+    workspace_handle: WeakEntity<Workspace>,
+    cx: &mut AsyncWindowContext,
+) {
+    let message = format!("Could not load the {panel_name} panel: {error:#}");
+    log::error!("{message}");
+    if let Err(show_error) = workspace_handle.update_in(cx, |workspace, _, cx| {
+        workspace.show_error(message, cx);
+    }) {
+        log::error!("Could not show the {panel_name} panel error: {show_error:#}");
+    }
 }
 
 fn setup_or_teardown_ai_panel<P: Panel>(
@@ -874,42 +991,97 @@ async fn initialize_agent_panel(
     workspace_handle: WeakEntity<Workspace>,
     mut cx: AsyncWindowContext,
 ) -> anyhow::Result<()> {
-    workspace_handle
-        .update_in(&mut cx, |workspace, window, cx| {
-            ensure_agent_panel_for_workspace(workspace, None, window, cx)
-        })?
-        .await?;
-
-    workspace_handle.update_in(&mut cx, |workspace, window, cx| {
-        cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {
-            ensure_agent_panel_for_workspace(workspace, None, window, cx).detach_and_log_err(cx);
-        })
-        .detach();
-
-        // Register the actions that are shared between `assistant` and `assistant2`.
-        //
-        // We need to do this here instead of within the individual `init`
-        // functions so that we only register the actions once.
-        //
-        // Once we ship `assistant2` we can push this back down into `agent::agent_panel::init`.
+    workspace_handle.update_in(&mut cx, |workspace, _window, _cx| {
+        // Register actions before the asynchronous panel restore. This keeps
+        // the menu useful on slower platforms and lets it load the panel on
+        // demand if startup restoration is still pending.
         if !cfg!(test) {
             workspace
-                .register_action(agent_ui::AgentPanel::toggle_focus)
+                .register_action(toggle_or_load_agent_panel)
                 .register_action(agent_ui::AgentPanel::focus)
                 .register_action(agent_ui::AgentPanel::toggle)
                 .register_action(agent_ui::InlineAssistant::inline_assist);
         }
     })?;
 
+    workspace_handle
+        .update_in(&mut cx, |workspace, window, cx| {
+            ensure_agent_panel_for_workspace(workspace, None, window, cx)
+        })?
+        .await?;
+
+    workspace_handle.update_in(&mut cx, |_workspace, window, cx| {
+        cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {
+            ensure_agent_panel_for_workspace(workspace, None, window, cx).detach_and_log_err(cx);
+        })
+        .detach();
+    })?;
+
     anyhow::Ok(())
+}
+
+fn toggle_or_load_agent_panel(
+    workspace: &mut Workspace,
+    _: &zed_actions::assistant::ToggleFocus,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if workspace.panel::<agent_ui::AgentPanel>(cx).is_some() {
+        workspace.toggle_panel_focus::<agent_ui::AgentPanel>(window, cx);
+        return;
+    }
+
+    let load = ensure_agent_panel_for_workspace(workspace, None, window, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        load.await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<agent_ui::AgentPanel>(window, cx);
+        })?;
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
 }
 
 fn register_actions(
     app_state: Arc<AppState>,
+    product_platform: ProductPlatform,
     workspace: &mut Workspace,
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    #[cfg(feature = "collaboration")]
+    if matches!(
+        product_platform,
+        ProductPlatform::Desktop | ProductPlatform::Ohos
+    ) {
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &collab_ui::collab_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
+            },
+        );
+    }
+
+    #[cfg(not(feature = "collaboration"))]
+    let _ = product_platform;
+
+    #[cfg(feature = "desktop")]
+    workspace.register_action(|_, action: &OpenZedUrl, _, cx| {
+        OpenListener::global(cx).open(RawOpenRequest {
+            urls: vec![String::from(&*action.url)],
+            ..Default::default()
+        })
+    });
+
+    #[cfg(feature = "desktop")]
+    workspace.register_action(|workspace, _: &OpenUrlPrompt, window, cx| {
+        workspace.toggle_modal(window, cx, |window, cx| {
+            open_url_modal::OpenUrlModal::new(window, cx)
+        });
+    });
+
     workspace
         .register_action(|_, _: &OpenDocs, _, cx| cx.open_url(DOCS_URL))
         .register_action(|_, _: &OpenStatusPage, _, cx| cx.open_url(STATUS_URL))
@@ -1022,17 +1194,6 @@ fn register_actions(
         })
         .register_action(|_, _: &ToggleFullScreen, window, _| {
             window.toggle_fullscreen();
-        })
-        .register_action(|_, action: &OpenZedUrl, _, cx| {
-            OpenListener::global(cx).open(RawOpenRequest {
-                urls: vec![String::from(&*action.url)],
-                ..Default::default()
-            })
-        })
-        .register_action(|workspace, _: &OpenUrlPrompt, window, cx| {
-            workspace.toggle_modal(window, cx, |window, cx| {
-                open_url_modal::OpenUrlModal::new(window, cx)
-            });
         })
         .register_action(|workspace, action: &OpenBrowser, _window, cx| {
             // Parse and validate the URL to ensure it's properly formatted
@@ -1245,32 +1406,6 @@ fn register_actions(
                 }
             }
         })
-        .register_action(|_, _: &install_cli::RegisterZedScheme, window, cx| {
-            cx.spawn_in(window, async move |workspace, cx| {
-                install_cli::register_zed_scheme(cx).await?;
-                workspace.update_in(cx, |workspace, _, cx| {
-                    struct RegisterZedScheme;
-
-                    workspace.show_toast(
-                        Toast::new(
-                            NotificationId::unique::<RegisterZedScheme>(),
-                            format!(
-                                "zed:// links will now open in {}.",
-                                ReleaseChannel::global(cx).display_name()
-                            ),
-                        ),
-                        cx,
-                    )
-                })?;
-                Ok(())
-            })
-            .detach_and_prompt_err(
-                "Error registering zed:// scheme",
-                window,
-                cx,
-                |_, _, _| None,
-            );
-        })
         .register_action(open_project_settings_file)
         .register_action(open_project_tasks_file)
         .register_action(open_worktree_setup_tasks_file)
@@ -1289,14 +1424,6 @@ fn register_actions(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<OutlinePanel>(window, cx);
-            },
-        )
-        .register_action(
-            |workspace: &mut Workspace,
-             _: &collab_ui::collab_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
             },
         )
         .register_action(
@@ -1367,7 +1494,35 @@ fn register_actions(
             }
         });
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(feature = "desktop")]
+    workspace.register_action(|_, _: &install_cli::RegisterZedScheme, window, cx| {
+        cx.spawn_in(window, async move |workspace, cx| {
+            install_cli::register_zed_scheme(cx).await?;
+            workspace.update_in(cx, |workspace, _, cx| {
+                struct RegisterZedScheme;
+
+                workspace.show_toast(
+                    Toast::new(
+                        NotificationId::unique::<RegisterZedScheme>(),
+                        format!(
+                            "zed:// links will now open in {}.",
+                            ReleaseChannel::global(cx).display_name()
+                        ),
+                    ),
+                    cx,
+                )
+            })?;
+            Ok(())
+        })
+        .detach_and_prompt_err(
+            "Error registering zed:// scheme",
+            window,
+            cx,
+            |_, _, _| None,
+        );
+    });
+
+    #[cfg(all(feature = "desktop", not(target_os = "windows")))]
     workspace.register_action(install_cli);
 
     if workspace.project().read(cx).is_via_remote_server() {
@@ -1728,6 +1883,7 @@ fn open_about_window(cx: &mut App) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[cfg(feature = "desktop")]
 fn install_cli(
     _: &mut Workspace,
     _: &install_cli::InstallCliBinary,
@@ -2762,7 +2918,7 @@ fn open_settings_file(
 ///
 /// This fast path exists to load these themes as soon as possible so the user
 /// doesn't see the default themes while waiting on extensions to load.
-pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut App) {
+pub fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut App) {
     let extension_store = ExtensionStore::global(cx);
     let theme_registry = ThemeRegistry::global(cx);
     let theme_settings = ThemeSettings::get_global(cx);
@@ -6065,7 +6221,7 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
-            initialize_workspace(app_state.clone(), cx);
+            initialize_workspace(app_state.clone(), ProductPlatform::Desktop, cx);
             search::init(cx);
             lsp_locations::init(cx);
             cx.set_global(workspace::PaneSearchBarCallbacks {

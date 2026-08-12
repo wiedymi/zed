@@ -1,26 +1,33 @@
+#[cfg(feature = "media")]
 pub mod diagnostics;
 pub mod participant;
 pub mod room;
 
 use anyhow::{Context as _, Result, anyhow};
+#[cfg(feature = "media")]
 use audio::Audio;
 use client::{ChannelId, Client, TypedEnvelope, User, UserStore, ZED_ALWAYS_ACTIVE, proto};
 use collections::HashSet;
 use futures::{Future, FutureExt, channel::oneshot, future::Shared};
+#[cfg(feature = "media")]
+use gpui::AnyView;
 use gpui::{
-    AnyView, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Subscription, Task,
-    TaskExt, WeakEntity, Window,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Subscription, Task, TaskExt,
+    WeakEntity, Window,
 };
 use postage::watch;
 use project::Project;
 use room::Event;
 use settings::Settings;
 use std::sync::Arc;
+#[cfg(feature = "media")]
+use workspace::SharedScreen;
 use workspace::{
     ActiveCallEvent, AnyActiveCall, GlobalAnyActiveCall, MultiWorkspace, MultiWorkspaceEvent, Pane,
-    RemoteCollaborator, SharedScreen, Workspace,
+    RemoteCollaborator, Workspace,
 };
 
+#[cfg(feature = "media")]
 pub use livekit_client::{RemoteVideoTrack, RemoteVideoTrackView, RemoteVideoTrackViewEvent};
 pub use room::Room;
 
@@ -235,14 +242,17 @@ impl AnyActiveCall for ActiveCallEntity {
                             participant_id: *participant_id,
                         })
                     }
+                    #[cfg(feature = "media")]
                     room::Event::RemoteVideoTracksChanged { participant_id } => {
                         Some(ActiveCallEvent::RemoteVideoTracksChanged {
                             participant_id: *participant_id,
                         })
                     }
+                    #[cfg(feature = "media")]
                     room::Event::LocalScreenShareStarted => {
                         Some(ActiveCallEvent::LocalScreenShareStarted)
                     }
+                    #[cfg(feature = "media")]
                     room::Event::LocalScreenShareStopped => {
                         Some(ActiveCallEvent::LocalScreenShareStopped)
                     }
@@ -256,6 +266,7 @@ impl AnyActiveCall for ActiveCallEntity {
         )
     }
 
+    #[cfg(feature = "media")]
     fn create_shared_screen(
         &self,
         peer_id: client::proto::PeerId,
@@ -336,10 +347,29 @@ impl AnyActiveCall for ActiveCallEntity {
         }))
     }
 
+    #[cfg(not(feature = "media"))]
+    fn create_shared_screen(
+        &self,
+        _peer_id: client::proto::PeerId,
+        _pane: &Entity<Pane>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Entity<workspace::SharedScreen>> {
+        None
+    }
+
     fn peer_ids_with_video_tracks(&self, cx: &App) -> Vec<proto::PeerId> {
+        #[cfg(not(feature = "media"))]
+        {
+            let _ = cx;
+            return Vec::new();
+        }
+
+        #[cfg(feature = "media")]
         let Some(room) = self.0.read(cx).room() else {
             return Vec::new();
         };
+        #[cfg(feature = "media")]
         room.read(cx)
             .remote_participants()
             .values()
@@ -391,6 +421,7 @@ pub struct IncomingCall {
 /// Singleton global maintaining the user's participation in a room across workspaces.
 pub struct ActiveCall {
     room: Option<(Entity<Room>, Vec<Subscription>)>,
+    #[cfg(feature = "media")]
     last_call_diagnostics: Option<Entity<diagnostics::CallDiagnostics>>,
     pending_room_creation: Option<Shared<Task<Result<Entity<Room>, Arc<anyhow::Error>>>>>,
     location: Option<WeakEntity<Project>>,
@@ -411,6 +442,7 @@ impl ActiveCall {
     fn new(client: Arc<Client>, user_store: Entity<UserStore>, cx: &mut Context<Self>) -> Self {
         Self {
             room: None,
+            #[cfg(feature = "media")]
             last_call_diagnostics: None,
             pending_room_creation: None,
             location: None,
@@ -689,9 +721,11 @@ impl ActiveCall {
         cx.notify();
         self.report_call_event("Call Ended", cx);
 
+        #[cfg(feature = "media")]
         Audio::end_call(cx);
 
         let channel_id = self.channel_id(cx);
+        #[cfg(feature = "media")]
         self.retain_room_diagnostics(cx);
         if let Some((room, _)) = self.room.take() {
             cx.emit(Event::RoomLeft { channel_id });
@@ -747,6 +781,7 @@ impl ActiveCall {
             Task::ready(Ok(()))
         } else {
             cx.notify();
+            #[cfg(feature = "media")]
             self.retain_room_diagnostics(cx);
             if let Some(room) = room {
                 if room.read(cx).status().is_offline() {
@@ -783,6 +818,7 @@ impl ActiveCall {
         self.room.as_ref().map(|(room, _)| room)
     }
 
+    #[cfg(feature = "media")]
     pub fn call_diagnostics(&self, cx: &App) -> Option<Entity<diagnostics::CallDiagnostics>> {
         self.room()
             .and_then(|room| room.read(cx).diagnostics())
@@ -790,6 +826,7 @@ impl ActiveCall {
             .or_else(|| self.last_call_diagnostics.clone())
     }
 
+    #[cfg(feature = "media")]
     fn retain_room_diagnostics(&mut self, cx: &App) {
         if let Some(diagnostics) = self
             .room()

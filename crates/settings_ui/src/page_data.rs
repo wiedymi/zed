@@ -1,8 +1,9 @@
 use gpui::{Action as _, App};
 use itertools::Itertools as _;
+#[cfg(not(target_env = "ohos"))]
+use settings::{AudioInputDeviceName, AudioOutputDeviceName};
 use settings::{
-    AudioInputDeviceName, AudioOutputDeviceName, EditPredictionDataCollectionChoice,
-    LanguageSettingsContent, SemanticTokens, SettingsContent,
+    EditPredictionDataCollectionChoice, LanguageSettingsContent, SemanticTokens, SettingsContent,
 };
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
@@ -13,20 +14,27 @@ use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
     pages::{
-        open_audio_test_window, render_edit_prediction_setup_page, render_external_agents_page,
-        render_llm_providers_page, render_mcp_servers_page, render_sandbox_settings_page,
-        render_skills_setup_page, render_tool_permissions_setup_page,
+        render_edit_prediction_setup_page, render_external_agents_page, render_llm_providers_page,
+        render_mcp_servers_page, render_sandbox_settings_page, render_skills_setup_page,
+        render_tool_permissions_setup_page,
     },
 };
+
+#[cfg(not(target_env = "ohos"))]
+use crate::pages::open_audio_test_window;
 
 const DEFAULT_STRING: String = String::new();
 /// A default empty string reference. Useful in `pick` functions for cases either in dynamic item fields, or when dealing with `settings::Maybe`
 /// to avoid the "NO DEFAULT" case.
 const DEFAULT_EMPTY_STRING: Option<&String> = Some(&DEFAULT_STRING);
 
+#[cfg(not(target_env = "ohos"))]
 const DEFAULT_AUDIO_OUTPUT: AudioOutputDeviceName = AudioOutputDeviceName(None);
+#[cfg(not(target_env = "ohos"))]
 const DEFAULT_EMPTY_AUDIO_OUTPUT: Option<&AudioOutputDeviceName> = Some(&DEFAULT_AUDIO_OUTPUT);
+#[cfg(not(target_env = "ohos"))]
 const DEFAULT_AUDIO_INPUT: AudioInputDeviceName = AudioInputDeviceName(None);
+#[cfg(not(target_env = "ohos"))]
 const DEFAULT_EMPTY_AUDIO_INPUT: Option<&AudioInputDeviceName> = Some(&DEFAULT_AUDIO_INPUT);
 
 macro_rules! concat_sections {
@@ -8060,6 +8068,7 @@ fn collaboration_page() -> SettingsPage {
         ]
     }
 
+    #[cfg(not(target_env = "ohos"))]
     fn audio_settings() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::ActionLink(ActionLink {
@@ -8122,9 +8131,14 @@ fn collaboration_page() -> SettingsPage {
         ]
     }
 
+    #[cfg(not(target_env = "ohos"))]
+    let items = concat_sections![calls_section(), audio_settings()];
+    #[cfg(target_env = "ohos")]
+    let items = calls_section().into_iter().collect();
+
     SettingsPage {
         title: "Collaboration",
-        items: concat_sections![calls_section(), audio_settings()],
+        items,
     }
 }
 

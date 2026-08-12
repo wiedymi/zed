@@ -1481,17 +1481,19 @@ impl WorktreeStore {
             .map(|worktree| {
                 let snapshot = worktree.read(cx).snapshot();
                 let folder_path = snapshot.abs_path().to_path_buf();
-                let main_path = snapshot
-                    .root_repo_common_dir()
-                    .filter(|dir| !crate::git_store::is_submodule_git_dir(dir))
-                    .map(|dir| crate::git_store::repo_identity_path(dir))
-                    .filter(|repo_path| {
-                        snapshot.root_repo_is_linked_worktree()
-                            || *repo_path == folder_path.as_path()
-                            || !folder_path.starts_with(*repo_path)
-                    })
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| folder_path.clone());
+                let main_path = if snapshot.root_repo_is_linked_worktree() {
+                    snapshot
+                        .root_repo_common_dir()
+                        .filter(|dir| !crate::git_store::is_submodule_git_dir(dir))
+                        .map(|dir| crate::git_store::repo_identity_path(dir.as_ref()))
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| folder_path.clone())
+                } else {
+                    // Normal, submodule, and `--separate-git-dir` worktrees all
+                    // identify with the opened folder. Only a linked worktree is
+                    // grouped under the main repository derived from commondir.
+                    folder_path.clone()
+                };
                 (main_path, folder_path)
             })
             .unzip();

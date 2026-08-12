@@ -13,6 +13,28 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000_u32;
 
 pub use gpui_util::new_std_command;
 
+/// Describes where an executable that Zed will run came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutableOrigin {
+    PackagedHnp,
+    ConfiguredOhosPath,
+    NodePackage,
+    RemoteHost,
+    NativeDownload,
+}
+
+impl ExecutableOrigin {
+    /// Rejects origins that cannot produce a valid local executable on this target.
+    pub fn ensure_supported(self) -> anyhow::Result<()> {
+        if cfg!(target_env = "ohos") && self == Self::NativeDownload {
+            anyhow::bail!(
+                "Downloaded desktop native executables are not supported on HarmonyOS. Use an executable from the Zed HNP, an explicit HarmonyOS path, a portable package, or a remote host."
+            );
+        }
+        Ok(())
+    }
+}
+
 pub fn new_command(program: impl AsRef<OsStr>) -> Command {
     Command::new(program)
 }

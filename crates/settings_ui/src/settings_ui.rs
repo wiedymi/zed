@@ -9,10 +9,11 @@ use editor::{Editor, EditorEvent};
 use futures::{StreamExt, channel::mpsc};
 use fuzzy::StringMatchCandidate;
 use gpui::{
-    Action, App, AsyncApp, ClipboardItem, DEFAULT_ADDITIONAL_WINDOW_SIZE, Div, Entity, FocusHandle,
-    Focusable, Global, KeyContext, ListState, ReadGlobal as _, Role, ScrollHandle, Stateful,
-    Subscription, Task, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window, WindowBounds,
-    WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px, uniform_list,
+    Action, App, AsyncApp, ClipboardItem, DEFAULT_ADDITIONAL_WINDOW_SIZE, DismissEvent, Div,
+    Entity, EventEmitter, FocusHandle, Focusable, Global, KeyContext, ListState, ReadGlobal as _,
+    Role, ScrollHandle, Stateful, Subscription, Task, TitlebarOptions, UniformListScrollHandle,
+    WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, actions, div, list, point,
+    prelude::*, px, uniform_list,
 };
 
 use language::Buffer;
@@ -43,9 +44,10 @@ use ui::{
 };
 
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
+#[cfg(not(target_env = "ohos"))]
+use workspace::WorkspaceSettings;
 use workspace::{
-    AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
-    client_side_decorations,
+    AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, client_side_decorations,
 };
 use zed_actions::{
     AGENT_SKILLS_SETTINGS_PATH, OpenProjectSettings, OpenSettings, OpenSettingsAt,
@@ -57,10 +59,9 @@ use crate::components::{
     SettingsSectionHeader, font_picker, icon_theme_picker, render_ollama_model_picker,
     text_field_a11y_state, theme_picker,
 };
-use crate::pages::{
-    CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
-    render_output_audio_device_dropdown,
-};
+use crate::pages::{CustomAgentForm, LlmProviderForm, McpServerForm};
+#[cfg(not(target_env = "ohos"))]
+use crate::pages::{render_input_audio_device_dropdown, render_output_audio_device_dropdown};
 
 const NAVBAR_CONTAINER_TAB_INDEX: isize = 0;
 const NAVBAR_GROUP_TAB_INDEX: isize = 1;
@@ -648,11 +649,14 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::SemanticTokens>(render_dropdown)
         .add_basic_renderer::<settings::DocumentFoldingRanges>(render_dropdown)
         .add_basic_renderer::<settings::DocumentSymbols>(render_dropdown)
-        .add_basic_renderer::<settings::AudioInputDeviceName>(render_input_audio_device_dropdown)
-        .add_basic_renderer::<settings::AudioOutputDeviceName>(render_output_audio_device_dropdown)
         .add_basic_renderer::<settings::TerminalBell>(render_dropdown)
         // please semicolon stay on next line
         ;
+
+    #[cfg(not(target_env = "ohos"))]
+    cx.default_global::<SettingFieldRenderer>()
+        .add_basic_renderer::<settings::AudioInputDeviceName>(render_input_audio_device_dropdown)
+        .add_basic_renderer::<settings::AudioOutputDeviceName>(render_output_audio_device_dropdown);
 }
 
 #[derive(Clone, Copy)]
@@ -854,6 +858,9 @@ fn open_settings_editor_with(
         let scaled_bounds: gpui::Size<Pixels> = default_bounds.map(|axis| axis * scale_factor);
 
         let app_id = ReleaseChannel::global(cx).app_id();
+        #[cfg(target_env = "ohos")]
+        let window_decorations = gpui::WindowDecorations::Server;
+        #[cfg(not(target_env = "ohos"))]
         let window_decorations = match std::env::var("ZED_WINDOW_DECORATIONS") {
             Ok(val) if val == "server" => gpui::WindowDecorations::Server,
             Ok(val) if val == "client" => gpui::WindowDecorations::Client,
@@ -985,6 +992,16 @@ pub struct SettingsWindow {
     pub(crate) external_agent_add_focus_handle: FocusHandle,
     skill_creator_page: Option<(Entity<pages::SkillCreatorPage>, Subscription)>,
 }
+
+impl Focusable for SettingsWindow {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for SettingsWindow {}
+
+impl workspace::ModalView for SettingsWindow {}
 
 struct SearchDocument {
     id: usize,
@@ -1942,7 +1959,7 @@ impl SettingsWindow {
         })
         .detach();
 
-        let title_bar = if !cfg!(target_os = "macos") {
+        let title_bar = if !cfg!(any(target_os = "macos", target_env = "ohos")) {
             Some(cx.new(|cx| PlatformTitleBar::new("settings-title-bar", cx)))
         } else {
             None
@@ -3910,7 +3927,7 @@ impl SettingsWindow {
                         div().pr_2().pb_1().child(
                             Button::new("manage-trust", "Manage Trust")
                                 .style(ButtonStyle::Tinted(ui::TintColor::Warning))
-                                .on_click(cx.listener(move |_this, _, window, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     if let Some(original_window) = original_window {
                                         original_window
                                             .update(cx, |multi_workspace, window, cx| {
@@ -3925,8 +3942,7 @@ impl SettingsWindow {
                                             })
                                             .log_err();
                                     }
-                                    // Close the settings window
-                                    window.remove_window();
+                                    this.close_surface(window, cx);
                                 })),
                         ),
                     )
@@ -4077,7 +4093,7 @@ impl SettingsWindow {
                     })
                     .ok();
 
-                window.remove_window();
+                self.close_surface(window, cx);
             }
             SettingsUiFile::Project((worktree_id, path)) => {
                 let settings_path = path.join(paths::local_settings_file_relative_path());
@@ -4161,13 +4177,17 @@ impl SettingsWindow {
                     })
                     .ok();
 
-                window.remove_window();
+                self.close_surface(window, cx);
             }
             SettingsUiFile::Server(_) => {
                 // Server files are not editable
                 return;
             }
         };
+    }
+
+    fn close_surface(&self, window: &mut Window, _cx: &mut Context<Self>) {
+        window.remove_window();
     }
 
     fn current_page_index(&self) -> usize {
@@ -4481,7 +4501,7 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
 
-        client_side_decorations(
+        div().size_full().child(client_side_decorations(
             v_flex()
                 .text_color(cx.theme().colors().text)
                 .size_full()
@@ -4562,7 +4582,7 @@ impl Render for SettingsWindow {
                 ),
             window,
             cx,
-        )
+        ))
     }
 }
 
@@ -4649,7 +4669,15 @@ fn update_settings_file(
     match file {
         SettingsUiFile::Project((worktree_id, rel_path)) => {
             let rel_path = rel_path.join(paths::local_settings_file_relative_path());
-            let Some(settings_window) = window.root::<SettingsWindow>().flatten() else {
+            let settings_window = window.root::<SettingsWindow>().flatten().or_else(|| {
+                let multi_workspace = window.root::<MultiWorkspace>().flatten()?;
+                multi_workspace
+                    .read(cx)
+                    .workspace()
+                    .read(cx)
+                    .active_modal::<SettingsWindow>(cx)
+            });
+            let Some(settings_window) = settings_window else {
                 anyhow::bail!("No settings window found");
             };
 

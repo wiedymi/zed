@@ -321,21 +321,23 @@ impl NodeRuntime {
             .map(|(name, version)| format!("{name}@{version}"))
             .collect();
 
-        let arguments: Vec<_> = packages
-            .iter()
-            .map(|p| p.as_str())
-            .chain([
-                "--save-exact",
-                "--fetch-retry-mintimeout",
-                "2000",
-                "--fetch-retry-maxtimeout",
-                "5000",
-                "--fetch-timeout",
-                "5000",
-            ])
-            .collect();
+        let mut arguments: Vec<_> = packages.iter().map(|p| p.as_str()).collect();
+        arguments.extend([
+            "--save-exact",
+            "--fetch-retry-mintimeout",
+            "2000",
+            "--fetch-retry-maxtimeout",
+            "5000",
+            "--fetch-timeout",
+            "5000",
+        ]);
+        // HarmonyOS application sandboxes reject symlink creation. Zed starts
+        // npm-installed language servers through their concrete JavaScript
+        // entrypoints, so npm's convenience links in node_modules/.bin are
+        // unnecessary on this target.
+        #[cfg(target_env = "ohos")]
+        arguments.push("--no-bin-links");
 
-        // This is also wrong because the directory is wrong.
         self.run_npm_subcommand(Some(directory), "install", &arguments)
             .await?;
         Ok(())

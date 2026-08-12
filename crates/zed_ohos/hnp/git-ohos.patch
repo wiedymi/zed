@@ -1,0 +1,152 @@
+diff --git a/builtin/init-db.c b/builtin/init-db.c
+index 1e6ecf3ad6..7ca03ed9ae 100644
+--- a/builtin/init-db.c
++++ b/builtin/init-db.c
+@@ -14,5 +14,27 @@
+ #include "strbuf.h"
+ 
++static char *zed_ohos_private_git_dir(const char *work_tree)
++{
++	const char *metadata_root = getenv("ZED_OHOS_GIT_METADATA_ROOT");
++	struct strbuf path = STRBUF_INIT;
++	char *absolute_work_tree;
++	const unsigned char *byte;
++
++	if (!metadata_root || !*metadata_root)
++		return NULL;
++	if (!is_absolute_path(metadata_root))
++		die("ZED_OHOS_GIT_METADATA_ROOT must be an absolute path");
++
++	absolute_work_tree = absolute_pathdup(work_tree);
++	strbuf_addstr(&path, metadata_root);
++	strbuf_complete(&path, '/');
++	for (byte = (const unsigned char *)absolute_work_tree; *byte; byte++)
++		strbuf_addf(&path, "%02x", *byte);
++	free(absolute_work_tree);
++
++	return strbuf_detach(&path, NULL);
++}
++
+ static int guess_repository_type(const char *git_dir)
+ {
+ 	const char *slash;
+@@ -153,6 +175,14 @@ int cmd_init_db(int argc,
+ 	} else if (0 < argc) {
+ 		usage(init_db_usage[0]);
+ 	}
++	if (!real_git_dir && is_bare_repository_cfg != 1 &&
++	    !getenv(GIT_DIR_ENVIRONMENT)) {
++		char *cwd = xgetcwd();
++
++		real_git_dir = real_git_dir_to_free =
++			zed_ohos_private_git_dir(cwd);
++		free(cwd);
++	}
+ 	if (is_bare_repository_cfg == 1) {
+ 		char *cwd = xgetcwd();
+ 		setenv(GIT_DIR_ENVIRONMENT, cwd, argc > 0);
+diff --git a/builtin/clone.c b/builtin/clone.c
+index 31b6e041a4..34483323b9 100644
+--- a/builtin/clone.c
++++ b/builtin/clone.c
+@@ -861,6 +861,28 @@ static int path_exists(const char *path)
+ 	return !stat(path, &sb);
+ }
+ 
++static char *zed_ohos_private_git_dir(const char *work_tree)
++{
++	const char *metadata_root = getenv("ZED_OHOS_GIT_METADATA_ROOT");
++	struct strbuf path = STRBUF_INIT;
++	char *absolute_work_tree;
++	const unsigned char *byte;
++
++	if (!metadata_root || !*metadata_root)
++		return NULL;
++	if (!is_absolute_path(metadata_root))
++		die("ZED_OHOS_GIT_METADATA_ROOT must be an absolute path");
++
++	absolute_work_tree = absolute_pathdup(work_tree);
++	strbuf_addstr(&path, metadata_root);
++	strbuf_complete(&path, '/');
++	for (byte = (const unsigned char *)absolute_work_tree; *byte; byte++)
++		strbuf_addf(&path, "%02x", *byte);
++	free(absolute_work_tree);
++
++	return strbuf_detach(&path, NULL);
++}
++
+ int cmd_clone(int argc,
+ 	      const char **argv,
+ 	      const char *prefix,
+@@ -896,6 +918,7 @@ int cmd_clone(int argc,
+ 	char *option_origin = NULL;
+ 	struct string_list option_not = STRING_LIST_INIT_NODUP;
+ 	const char *real_git_dir = NULL;
++	char *zed_ohos_real_git_dir = NULL;
+ 	const char *ref_format = NULL;
+ 	const char *option_upload_pack = "git-upload-pack";
+ 	int option_progress = -1;
+@@ -1062,6 +1085,10 @@ int cmd_clone(int argc,
+ 	else
+ 		dir = git_url_basename(repo_name, is_bundle, option_bare);
+ 	strip_dir_trailing_slashes(dir);
++	if (!real_git_dir && !option_bare && !getenv(GIT_WORK_TREE_ENVIRONMENT)) {
++		zed_ohos_real_git_dir = zed_ohos_private_git_dir(dir);
++		real_git_dir = zed_ohos_real_git_dir;
++	}
+ 
+ 	dest_exists = path_exists(dir);
+ 	if (dest_exists && !is_empty_dir(dir))
+@@ -1641,6 +1668,7 @@ int cmd_clone(int argc,
+ 	free_refs(remote_head_points_at);
+ 	free(unborn_head);
+ 	free(dir);
++	free(zed_ohos_real_git_dir);
+ 	free(path);
+ 	free(repo_to_free);
+ 	junk_mode = JUNK_LEAVE_ALL;
+diff --git a/setup.c b/setup.c
+index e1c2f4cbcb..5ef48e074d 100644
+--- a/setup.c
++++ b/setup.c
+@@ -1310,7 +1310,38 @@ static int ensure_valid_ownership(const char *gitfile,
+ 	if (!git_env_bool("GIT_TEST_ASSUME_DIFFERENT_OWNER", 0) &&
+ 	    (!gitfile || is_path_owned_by_current_user(gitfile, report)) &&
+ 	    (!worktree || is_path_owned_by_current_user(worktree, report)) &&
+ 	    (!gitdir || is_path_owned_by_current_user(gitdir, report)))
+ 		return 1;
+ 
++	if (gitfile && worktree && gitdir) {
++		const char *metadata_root = getenv("ZED_OHOS_GIT_METADATA_ROOT");
++
++		if (metadata_root && *metadata_root) {
++			struct strbuf expected = STRBUF_INIT;
++			char *absolute_worktree;
++			char *normalized_expected;
++			char *normalized_gitdir;
++			const unsigned char *byte;
++			int is_managed;
++
++			absolute_worktree = absolute_pathdup(worktree);
++			strbuf_addstr(&expected, metadata_root);
++			strbuf_complete(&expected, '/');
++			for (byte = (const unsigned char *)absolute_worktree; *byte; byte++)
++				strbuf_addf(&expected, "%02x", *byte);
++			free(absolute_worktree);
++
++			normalized_expected = real_pathdup(expected.buf, 0);
++			normalized_gitdir = real_pathdup(gitdir, 0);
++			is_managed = normalized_expected &&
++				normalized_gitdir &&
++				!fspathcmp(normalized_expected, normalized_gitdir);
++			free(normalized_expected);
++			free(normalized_gitdir);
++			strbuf_release(&expected);
++			if (is_managed)
++				return 1;
++		}
++	}
++
+ 	/*
+ 	 * normalize the data.path for comparison with normalized paths
+ 	 * that come from the configuration file.  The path is unsafe

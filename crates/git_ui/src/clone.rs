@@ -117,8 +117,10 @@ pub fn clone_and_open(
                             let destination_path = destination_dir.clone();
                             let on_success = on_success.clone();
 
+                            let open_options = Default::default();
+
                             workspace::open_new(
-                                Default::default(),
+                                open_options,
                                 app_state,
                                 cx,
                                 move |workspace, window, cx| {

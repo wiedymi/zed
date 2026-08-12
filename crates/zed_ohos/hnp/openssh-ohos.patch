@@ -1,0 +1,128 @@
+diff --git a/Makefile.in b/Makefile.in
+index da59bcc..1f14598 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -111 +111 @@ LIBSSH_OBJS=${LIBOPENSSH_OBJS} \
+-	sshbuf-io.o misc-agent.o ssherr-libcrypto.o
++	sshbuf-io.o misc-agent.o ssherr-libcrypto.o ohos-pwd.o
+diff --git a/misc.c b/misc.c
+index 517fa7a..f60ed56 100644
+--- a/misc.c
++++ b/misc.c
+@@ -67,0 +68 @@
++#include "ohos-pwd.h"
+@@ -1303 +1304 @@ tilde_expand(const char *filename, uid_t uid, char **retp)
+-	} else if ((pw = getpwuid(uid)) == NULL) {
++	} else if ((pw = ohos_getpwuid(uid)) == NULL) {
+@@ -2848 +2849 @@ subprocess(const char *tag, const char *command,
+-	if (pw == NULL && (pw = getpwuid(getuid())) == NULL) {
++	if (pw == NULL && (pw = ohos_getpwuid(getuid())) == NULL) {
+@@ -3225 +3226 @@ get_homedir(void)
+-	if ((pw = getpwuid(getuid())) != NULL && *pw->pw_dir != '\0')
++	if ((pw = ohos_getpwuid(getuid())) != NULL && *pw->pw_dir != '\0')
+diff --git a/mux.c b/mux.c
+index 23f0032..098fc36 100644
+--- a/mux.c
++++ b/mux.c
+@@ -1375,0 +1376,10 @@ muxserver_listen(struct ssh *ssh)
++#ifdef __OHOS__
++	/* HarmonyOS application sandboxes reject hard links. The temporary
++	 * control path is private to this process, so rename it into place. */
++	if (access(orig_control_path, F_OK) == 0) {
++		errno = EEXIST;
++		goto mux_path_error;
++	}
++	if (rename(options.control_path, orig_control_path) != 0) {
++ mux_path_error:
++#else
+@@ -1376,0 +1387 @@ muxserver_listen(struct ssh *ssh)
++#endif
+@@ -1378 +1389 @@ muxserver_listen(struct ssh *ssh)
+-			fatal_f("link mux listener %s => %s: %s",
++			fatal_f("move mux listener %s => %s: %s",
+@@ -1386,0 +1398 @@ muxserver_listen(struct ssh *ssh)
++#ifndef __OHOS__
+@@ -1387,0 +1400 @@ muxserver_listen(struct ssh *ssh)
++#endif
+diff --git a/ohos-pwd.c b/ohos-pwd.c
+new file mode 100644
+index 0000000..ef9b242
+--- /dev/null
++++ b/ohos-pwd.c
+@@ -0,0 +1,43 @@
++/* HarmonyOS application UIDs do not have entries in /etc/passwd. */
++
++#include "includes.h"
++
++#include <sys/types.h>
++
++#include <pwd.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#include "ohos-pwd.h"
++
++static char *
++environment_or_default(const char *name, char *fallback)
++{
++	char *value = getenv(name);
++
++	return value != NULL && *value != '\0' ? value : fallback;
++}
++
++struct passwd *
++ohos_getpwuid(uid_t uid)
++{
++	struct passwd *system_user = getpwuid(uid);
++	static char default_name[] = "zed";
++	static char default_password[] = "*";
++	static char default_home[] = "/data/app";
++	static char default_shell[] = "/system/bin/sh";
++	static char default_gecos[] = "Zed";
++	static struct passwd user;
++
++	if (system_user != NULL || uid != getuid())
++		return system_user;
++
++	user.pw_name = environment_or_default("USER", default_name);
++	user.pw_passwd = default_password;
++	user.pw_uid = uid;
++	user.pw_gid = getgid();
++	user.pw_gecos = default_gecos;
++	user.pw_dir = environment_or_default("HOME", default_home);
++	user.pw_shell = environment_or_default("SHELL", default_shell);
++	return &user;
++}
+diff --git a/ohos-pwd.h b/ohos-pwd.h
+new file mode 100644
+index 0000000..b62ca01
+--- /dev/null
++++ b/ohos-pwd.h
+@@ -0,0 +1,9 @@
++#ifndef OHOS_PWD_H
++#define OHOS_PWD_H
++
++#include <sys/types.h>
++#include <pwd.h>
++
++struct passwd *ohos_getpwuid(uid_t uid);
++
++#endif
+diff --git a/scp.c b/scp.c
+index 28ac7a2..84e76bf 100644
+--- a/scp.c
++++ b/scp.c
+@@ -119,0 +120 @@
++#include "ohos-pwd.h"
+@@ -631 +632 @@ main(int argc, char **argv)
+-	if ((pwd = getpwuid(userid = getuid())) == NULL)
++	if ((pwd = ohos_getpwuid(userid = getuid())) == NULL)
+diff --git a/ssh.c b/ssh.c
+index 7c644c2..8dc2c77 100644
+--- a/ssh.c
++++ b/ssh.c
+@@ -98,0 +99 @@
++#include "ohos-pwd.h"
+@@ -664 +665 @@ main(int ac, char **av)
+-	pw = getpwuid(getuid());
++	pw = ohos_getpwuid(getuid());

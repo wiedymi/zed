@@ -1,0 +1,26 @@
+[package]
+name = "gpui_text"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/gpui_text.rs"
+
+[dependencies]
+anyhow.workspace = true
+collections.workspace = true
+cosmic-text = "0.19.0"
+gpui.workspace = true
+itertools.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+profiling.workspace = true
+smallvec.workspace = true
+swash.workspace = true
+unicode-bidi.workspace = true
+unicode-segmentation.workspace = true

@@ -145,7 +145,7 @@ impl CanonicalPathBuf {
             // and `readlink` of an `O_PATH|O_NOFOLLOW` fd on a symlink returns
             // the symlink's *own* path (equal to `path`), so the comparison
             // below wouldn't catch it.
-            let stat = nix::sys::stat::fstat(fd.as_raw_fd()).map_err(io::Error::from)?;
+            let stat = nix::sys::stat::fstat(fd.as_fd()).map_err(io::Error::from)?;
             if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -297,6 +297,8 @@ impl Eq for CanonicalPathBuf {}
 /// filesystem object.
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_fd_identity(fd: std::os::fd::RawFd) -> Option<(u64, u64)> {
+    // SAFETY: callers keep `fd` open for this synchronous identity query.
+    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let stat = nix::sys::stat::fstat(fd).ok()?;
     Some((stat.st_dev as u64, stat.st_ino as u64))
 }

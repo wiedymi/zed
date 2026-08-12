@@ -107,11 +107,15 @@ static DOTNET_PROJECT_FILES_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn os_name() -> String {
+    #[cfg(target_env = "ohos")]
+    {
+        "HarmonyOS/OpenHarmony".to_string()
+    }
     #[cfg(target_os = "macos")]
     {
         "macOS".to_string()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     {
         format!("Linux {}", gpui::guess_compositor())
     }
@@ -133,6 +137,18 @@ pub fn os_version() -> String {
            // MacOS branch in particular is quite slow, hence we ought to "avoid" it in tests.
            "test binary".to_owned()
        }
+       target_env = "ohos" => {
+           let content = std::fs::read_to_string("/etc/os-release")
+               .or_else(|_| std::fs::read_to_string("/system/etc/os-release"));
+           match content {
+               Ok(content) => util::parse_os_release(&content)
+                   .unwrap_or_else(|| "unknown".to_string()),
+               Err(error) => {
+                   log::error!("Failed to load the HarmonyOS system release: {error}");
+                   "unknown".to_string()
+               }
+           }
+       }
        target_os = "macos" => {
            static MACOS_VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
                Regex::new(r"(\s*\(Build [^)]*[0-9]\))").unwrap()
@@ -148,7 +164,7 @@ pub fn os_version() -> String {
                .replace_all(&version_string, "")
                .to_string()
        }
-       any(target_os = "linux", target_os = "freebsd") => {
+       any(all(target_os = "linux", not(target_env = "ohos")), target_os = "freebsd") => {
            use std::path::Path;
 
            let content = if let Ok(file) = std::fs::read_to_string(&Path::new("/etc/os-release")) {

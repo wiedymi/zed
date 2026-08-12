@@ -193,17 +193,26 @@ struct TrashedEntry {
     /// * Freedesktop – Path to the `.trashinfo` file.
     /// * macOS & Windows – Full path to the file/directory in the system's
     /// trash.
-    pub id: OsString,
+    pub location: TrashLocation,
     /// Name of the file/directory at the time of trashing, including extension.
     pub name: OsString,
     /// Absolute path to the parent directory at the time of trashing.
     pub original_parent: PathBuf,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+enum TrashLocation {
+    #[cfg(not(target_env = "ohos"))]
+    System(OsString),
+    #[cfg(target_env = "ohos")]
+    Private(PathBuf),
+}
+
+#[cfg(not(target_env = "ohos"))]
 impl From<trash::TrashItem> for TrashedEntry {
     fn from(item: trash::TrashItem) -> Self {
         Self {
-            id: item.id,
+            location: TrashLocation::System(item.id),
             name: item.name,
             original_parent: item.original_parent,
         }
@@ -211,9 +220,11 @@ impl From<trash::TrashItem> for TrashedEntry {
 }
 
 impl TrashedEntry {
+    #[cfg(not(target_env = "ohos"))]
     fn into_trash_item(self) -> trash::TrashItem {
+        let TrashLocation::System(id) = self.location;
         trash::TrashItem {
-            id: self.id,
+            id,
             name: self.name,
             original_parent: self.original_parent,
             // `TrashedEntry` doesn't preserve `time_deleted` as we don't
@@ -238,6 +249,7 @@ pub enum TrashRestoreError {
     Unknown { description: String },
 }
 
+#[cfg(not(target_env = "ohos"))]
 impl From<trash::Error> for TrashRestoreError {
     fn from(err: trash::Error) -> Self {
         match err {
@@ -530,6 +542,52 @@ impl RealFs {
             job_event_subscribers: Arc::new(Mutex::new(Vec::new())),
             trash: Arc::new(Mutex::new(SlotMap::with_key())),
             is_case_sensitive: Default::default(),
+        }
+    }
+
+    fn git_command(&self) -> Result<util::command::Command> {
+        #[cfg(target_env = "ohos")]
+        {
+            let git_binary = self
+                .bundled_git_binary_path
+                .as_deref()
+                .context("packaged HarmonyOS Git executable is unavailable")?;
+            let canonical_git = std::fs::canonicalize(git_binary).with_context(|| {
+                format!(
+                    "resolving packaged HarmonyOS Git executable {}",
+                    git_binary.display()
+                )
+            })?;
+            let tools_root = canonical_git
+                .parent()
+                .and_then(Path::parent)
+                .context("packaged HarmonyOS Git executable has no package root")?;
+            let mut command = new_command(git_binary);
+            command.env("GIT_EXEC_PATH", tools_root.join("libexec").join("git-core"));
+            command.env(
+                "GIT_TEMPLATE_DIR",
+                tools_root.join("share").join("git-core").join("templates"),
+            );
+            command.env(
+                "GIT_SSL_CAINFO",
+                tools_root
+                    .join("share")
+                    .join("certs")
+                    .join("ca-certificates.crt"),
+            );
+            let git_metadata_root = paths::data_dir().join("git");
+            std::fs::create_dir_all(&git_metadata_root).with_context(|| {
+                format!(
+                    "creating private HarmonyOS Git metadata root at {}",
+                    git_metadata_root.display()
+                )
+            })?;
+            command.env("ZED_OHOS_GIT_METADATA_ROOT", git_metadata_root);
+            Ok(command)
+        }
+        #[cfg(not(target_env = "ohos"))]
+        {
+            Ok(new_command("git"))
         }
     }
 
@@ -881,10 +939,45 @@ impl Fs for RealFs {
         // its target and leave the link behind.
         let path = std::path::absolute(path).context("Could not make the path absolute")?;
 
+        #[cfg(not(target_env = "ohos"))]
         let entry = smol::unblock(move || trash::delete_with_info(path))
             .await
             .context("Could not trash file or dir")?
             .into();
+
+        #[cfg(target_env = "ohos")]
+        let entry = smol::unblock(move || -> Result<TrashedEntry> {
+            let name = path
+                .file_name()
+                .context("Cannot move a filesystem root to trash")?
+                .to_os_string();
+            let original_parent = path
+                .parent()
+                .context("Cannot move a filesystem root to trash")?
+                .to_path_buf();
+            let trash_root = paths::data_dir().join("trash");
+            std::fs::create_dir_all(&trash_root)
+                .with_context(|| format!("Could not create {}", trash_root.display()))?;
+            let container = tempfile::Builder::new()
+                .prefix("entry-")
+                .tempdir_in(&trash_root)
+                .with_context(|| format!("Could not allocate space in {}", trash_root.display()))?;
+            let trashed_path = container.path().join(&name);
+            std::fs::rename(&path, &trashed_path).with_context(|| {
+                format!(
+                    "Could not move {} to the private HarmonyOS trash at {}",
+                    path.display(),
+                    trashed_path.display()
+                )
+            })?;
+            let _container_path = container.keep();
+            Ok(TrashedEntry {
+                location: TrashLocation::Private(trashed_path),
+                name,
+                original_parent,
+            })
+        })
+        .await?;
 
         Ok(self.trash.lock().insert(entry))
     }
@@ -1210,9 +1303,10 @@ impl Fs for RealFs {
         abs_work_directory_path: &Path,
         fallback_branch_name: String,
     ) -> Result<()> {
-        let result = new_command("git")
+        let result = self
+            .git_command()?
             .current_dir(abs_work_directory_path)
-            .args(&["config", "--global", "--get", "init.defaultBranch"])
+            .args(["config", "--global", "--get", "init.defaultBranch"])
             .output()
             .await;
 
@@ -1224,12 +1318,18 @@ impl Fs for RealFs {
             _ => fallback_branch_name,
         };
 
-        new_command("git")
+        let output = self
+            .git_command()?
             .current_dir(abs_work_directory_path)
-            .args(&["init", "-b"])
+            .args(["init", "-b"])
             .arg(branch_name.trim())
             .output()
             .await?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
 
         Ok(())
     }
@@ -1244,9 +1344,10 @@ impl Fs for RealFs {
 
         let _job_tracker = JobTracker::new(job_info, self.job_event_subscribers.clone());
 
-        let output = new_command("git")
+        let output = self
+            .git_command()?
             .current_dir(abs_work_directory)
-            .args(&["clone", repo_url])
+            .args(["clone", repo_url])
             .output()
             .await?;
 
@@ -1264,7 +1365,8 @@ impl Fs for RealFs {
     /// Will return `Ok` if the commands exit status is `0`, with the stdout
     /// contents. Otherwise returns `Err` with the stderr contents.
     async fn git_config(&self, abs_work_directory: &Path, args: Vec<String>) -> Result<String> {
-        let output = new_command("git")
+        let output = self
+            .git_command()?
             .current_dir(abs_work_directory)
             .args([String::from("config")].into_iter().chain(args))
             .output()
@@ -1368,16 +1470,49 @@ impl Fs for RealFs {
 
         let restored_item_path = trashed_entry.original_parent.join(&trashed_entry.name);
 
-        let (tx, rx) = futures::channel::oneshot::channel();
-        std::thread::Builder::new()
-            .name("restore trashed item".to_string())
-            .spawn(move || {
-                let res = trash::restore_all([trashed_entry.into_trash_item()]);
-                tx.send(res)
-            })
-            .expect("The OS can spawn a threads");
+        #[cfg(not(target_env = "ohos"))]
+        {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            std::thread::Builder::new()
+                .name("restore trashed item".to_string())
+                .spawn(move || {
+                    let res = trash::restore_all([trashed_entry.into_trash_item()]);
+                    tx.send(res)
+                })
+                .expect("The OS can spawn a threads");
 
-        rx.await.expect("Restore all never panics")?;
+            rx.await.expect("Restore all never panics")?;
+        }
+
+        #[cfg(target_env = "ohos")]
+        {
+            let TrashLocation::Private(trashed_path) = trashed_entry.location;
+            let restored_item_path_for_task = restored_item_path.clone();
+            smol::unblock(move || {
+                if restored_item_path_for_task.exists() {
+                    return Err(TrashRestoreError::Collision {
+                        path: restored_item_path_for_task,
+                    });
+                }
+                if !trashed_path.exists() {
+                    return Err(TrashRestoreError::NotFound { path: trashed_path });
+                }
+                std::fs::rename(&trashed_path, &restored_item_path_for_task).map_err(|error| {
+                    TrashRestoreError::Unknown {
+                        description: format!(
+                            "Could not restore {} to {}: {error}",
+                            trashed_path.display(),
+                            restored_item_path_for_task.display()
+                        ),
+                    }
+                })?;
+                if let Some(container) = trashed_path.parent() {
+                    let _ = std::fs::remove_dir(container);
+                }
+                Ok(())
+            })
+            .await?;
+        }
         self.trash.lock().remove(trash_id);
         Ok(restored_item_path)
     }
@@ -3061,9 +3196,13 @@ impl Fs for FakeFs {
 
         match result {
             Some(fake_entry) => {
+                #[cfg(not(target_env = "ohos"))]
+                let location = TrashLocation::System(base_name.to_os_string());
+                #[cfg(target_env = "ohos")]
+                let location = TrashLocation::Private(normalized_path.clone());
                 let trashed_entry = TrashedEntry {
-                    id: base_name.to_str().unwrap().into(),
-                    name: base_name.to_str().unwrap().into(),
+                    location,
+                    name: base_name.to_os_string(),
                     original_parent: parent_path.to_path_buf(),
                 };
 
